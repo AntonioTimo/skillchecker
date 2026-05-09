@@ -169,6 +169,9 @@ GREEN means "no known patterns matched", not "100% safe". Don't run a
 freshly-installed skill on production-sensitive files in the first run.
 Test it on something benign first.
 
+For the full classification of what we catch, what we treat as fixable, what
+we let through, and what we explicitly don't address — see [THREAT_MODEL.md](THREAT_MODEL.md).
+
 ---
 
 ## How this was built
@@ -217,7 +220,12 @@ Issues and PRs welcome, especially:
 - Translations of `references/*.md` (currently mixed English/Russian)
 - Real-world skill submissions that produce surprising verdicts (false positive or false negative)
 
-Before submitting a PR with new rules: include a unit test in `examples/` showing what the rule should/shouldn't match. Static rules with high false-positive rates make the tool unusable.
+**Before opening a PR with a new rule, read [THREAT_MODEL.md](THREAT_MODEL.md).**
+It defines what counts as malicious vs sloppy vs acceptable, the false-positive
+budget per severity, and what the PR must include (positive + negative test
+cases, patch template if non-CRITICAL, false-positive guard if applicable).
+Rules that don't fit the threat model or exceed the FP budget will not be
+merged — the scanner is only useful if its findings are believed.
 
 ---
 
