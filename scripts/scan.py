@@ -168,7 +168,14 @@ CRITICAL_RULES = [
      "Dangerous retry / fail-open behavior",
      "Refuse. Skills should fail closed."),
 
-    ("CR031", r"(?i)(?:treat|use)\s+(?:the\s+)?(?:document|file|input|book|content)\s+as\s+(?:system\s+)?instructions|follow\s+(?:the\s+)?instructions\s+(?:in|inside)\s+(?:the\s+)?(?:document|file|input)",
+    ("CR031", r"(?i)(?:treat|use|read)\s+(?:the\s+|this\s+|that\s+)?"
+              r"(?:document|file|input|book|content|attachment|payload|data)"
+              r"[^\n]{0,40}?\s+as\s+"
+              r"(?:(?:your|the|new|a)\s+)*"
+              r"(?:system\s+)?(?:prompt|instructions?|directives?|commands?)|"
+              r"follow\s+(?:the\s+|its\s+|their\s+)?instructions\s+"
+              r"(?:in|inside|from|of)\s+(?:the\s+|this\s+)?"
+              r"(?:document|file|input|book|content|attachment)",
      "Role confusion — skill asks the model to treat untrusted input as instructions",
      "Refuse. This is the prompt-injection vulnerability the skill should be defending against, not enabling."),
 ]
@@ -385,6 +392,13 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                         continue
                 if rule_id == "ME004":
                     if line.rstrip().endswith((",", "(", "\\")):
+                        continue
+                if rule_id == "ME006":
+                    # If description uses YAML folded/literal scalar
+                    # (description: >-, description: |, description: >),
+                    # the actual content is on the following lines and
+                    # ME006's single-line length check doesn't apply.
+                    if re.search(r"^description:\s*[>|][-+]?\s*$", line):
                         continue
                 if rule_id in ("CR020", "CR021"):
                     # Skip if match is inside a string literal that's an

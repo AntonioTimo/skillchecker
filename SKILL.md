@@ -1,7 +1,18 @@
 ---
 name: skill-checker
-description: Audits any Claude Code skill before you install it — flags malicious patterns (data exfiltration, persistence, obfuscation, description-vs-behavior mismatch) and sloppy patterns (overbroad allowed-tools, prompt injection vulnerabilities, missing input validation, predictable temp paths). Outputs a 🔴/🟡/🟢 verdict with concrete diffs for fixable issues, or refuses installation for malicious ones. Use before adding any third-party skill to ~/.claude/skills/.
-when_to_use: Trigger phrases — "audit this skill", "check this skill", "is this skill safe", "review this skill before I install", "skill-checker", "проверь скилл", "ауди скилла", "стоит ли ставить этот скилл". Accepts a path to a skill directory (uninstalled in ~/Downloads, or already installed under ~/.claude/skills/).
+description: >-
+  Audits any Claude Code skill before you install it — flags malicious patterns
+  (data exfiltration, persistence, obfuscation, description-vs-behavior mismatch)
+  and sloppy patterns (overbroad allowed-tools, prompt injection vulnerabilities,
+  missing input validation, predictable temp paths). Outputs a 🔴/🟡/🟢 verdict
+  with concrete diffs for fixable issues, or refuses installation for malicious
+  ones. Use before adding any third-party skill to ~/.claude/skills/.
+when_to_use: >-
+  Trigger phrases — "audit this skill", "check this skill", "is this skill safe",
+  "review this skill before I install", "skill-checker", "проверь скилл",
+  "ауди скилла", "стоит ли ставить этот скилл". Accepts a path to a skill
+  directory (uninstalled in ~/Downloads, or already installed under
+  ~/.claude/skills/).
 disable-model-invocation: true
 context: fork
 agent: general-purpose

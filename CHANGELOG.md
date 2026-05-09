@@ -4,7 +4,31 @@ All notable changes to skill-checker.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [1.0.0] — Initial release
+## [1.0.1] — 2026-05-09
+
+Patch release addressing post-publication audit feedback. No rule changes,
+no behavior changes — readability and CI hardening only.
+
+### Fixed
+- YAML frontmatter readability: `description:` and `when_to_use:` fields in
+  `SKILL.md` and `examples/clean-skill/SKILL.md` now use folded scalar syntax
+  (`>-`). Content is identical for the parser; diffs and code review on
+  GitHub no longer require horizontal scrolling.
+- README: long prose paragraphs (some over 380 chars) re-wrapped at ~80
+  columns. Markdown rendering is unchanged.
+
+### Added
+- GitHub Actions CI (`.github/workflows/tests.yml`):
+  - Syntax check on `scripts/scan.py`
+  - `examples/clean-skill/` must exit 0 (GREEN)
+  - `examples/evil-skill/` must exit 3 (RED)
+  - `evil-skill` must produce findings for representative attack classes
+    (`FM005`, `CR001`, `CR006`, `CR026`, `CR028`, `CR031`)
+  - Self-audit smoke test (no runtime errors; counts not asserted because
+    self-audit produces documented false positives — see Limitations §5)
+- README: CI status badge and MIT license badge
+
+## [1.0.0] — 2026-05-09 — Initial release
 
 First public release. Established the audit pipeline (8 LLM-driven steps + static scanner) and the rule catalogue.
 

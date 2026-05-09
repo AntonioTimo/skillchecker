@@ -1,17 +1,28 @@
 # 🛡️ skill-checker
 
+[![tests](https://github.com/AntonioTimo/skillchecker/actions/workflows/tests.yml/badge.svg)](https://github.com/AntonioTimo/skillchecker/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 > Paranoid auditor for Claude Code skills.
 > Refuse the malicious, patch the sloppy, install the safe.
 
-A read-only auditor that runs **before** you install any third-party Claude Code skill. It catches what one pair of eyes misses — the static scanner pattern-matches against a curated catalogue of dangerous behaviors, and the LLM-driven steps in `SKILL.md` add semantic checks (description-vs-behavior consistency, tool laundering, confused deputy, prompt-injection vulnerabilities).
+A read-only auditor that runs **before** you install any third-party Claude
+Code skill. It catches what one pair of eyes misses — the static scanner
+pattern-matches against a curated catalogue of dangerous behaviors, and the
+LLM-driven steps in `SKILL.md` add semantic checks (description-vs-behavior
+consistency, tool laundering, confused deputy, prompt-injection vulnerabilities).
 
 Output is one of three verdicts:
 
-- 🔴 **RED** — refuse to install. Concrete reasons reported, no patches offered (malice tends to be defense-in-depth).
-- 🟡 **YELLOW** — patches required. Each finding comes with an exact diff. You apply manually, re-run, iterate to GREEN.
+- 🔴 **RED** — refuse to install. Concrete reasons reported, no patches
+  offered (malice tends to be defense-in-depth).
+- 🟡 **YELLOW** — patches required. Each finding comes with an exact diff.
+  You apply manually, re-run, iterate to GREEN.
 - 🟢 **GREEN** — safe to install. Install command + brief usage included.
 
-Read-only by design: the `allowed-tools` list contains zero write/delete/network operations. The auditor cannot modify the skill being audited, your filesystem, or anything else.
+Read-only by design: the `allowed-tools` list contains zero
+write/delete/network operations. The auditor cannot modify the skill being
+audited, your filesystem, or anything else.
 
 ---
 
@@ -75,7 +86,9 @@ Then in Claude Code:
 /skill-checker ~/staging/skills/some-skill/
 ```
 
-The auditor walks through eight steps (inventory → static scan → frontmatter audit → bash audit → script audit → tool laundering → confused deputy → prompt injection → consistency → verdict).
+The auditor walks through eight steps (inventory → static scan → frontmatter
+audit → bash audit → script audit → tool laundering → confused deputy →
+prompt injection → consistency → verdict).
 
 ### 3. Act on the verdict
 
@@ -137,13 +150,24 @@ File: SKILL.md
 
 This checker does not catch every threat class. It catches the common ones, fast.
 
-1. **No dynamic analysis.** A skill that fetches malicious code at runtime from a server it controls passes static checks. Mitigation: 🔴 any skill with both network calls and writeable filesystem operations.
-2. **No supply-chain analysis.** A malicious update to a third-party Python library it imports won't be detected. Pin and audit dependencies separately.
-3. **LLM judgment is fallible.** Adversarial code can mimic benign code. When the static scan flags multiple HIGH findings, even if individually explainable, treat it as a pattern.
-4. **Update means re-audit.** A skill that was 🟢 yesterday may be 🔴 today. Re-run after any upstream update.
-5. **Self-audit is a known edge case.** Running `/skill-checker` against skill-checker itself yields ~30 false positives (the docs literally describe attack patterns). Documentation skills will trip the same way; manual judgment overrides the static counts.
+1. **No dynamic analysis.** A skill that fetches malicious code at runtime
+   from a server it controls passes static checks. Mitigation: 🔴 any skill
+   with both network calls and writeable filesystem operations.
+2. **No supply-chain analysis.** A malicious update to a third-party Python
+   library it imports won't be detected. Pin and audit dependencies separately.
+3. **LLM judgment is fallible.** Adversarial code can mimic benign code.
+   When the static scan flags multiple HIGH findings, even if individually
+   explainable, treat it as a pattern.
+4. **Update means re-audit.** A skill that was 🟢 yesterday may be 🔴 today.
+   Re-run after any upstream update.
+5. **Self-audit is a known edge case.** Running `/skill-checker` against
+   skill-checker itself yields ~30 false positives (the docs literally
+   describe attack patterns). Documentation skills will trip the same way;
+   manual judgment overrides the static counts.
 
-GREEN means "no known patterns matched", not "100% safe". Don't run a freshly-installed skill on production-sensitive files in the first run. Test it on something benign first.
+GREEN means "no known patterns matched", not "100% safe". Don't run a
+freshly-installed skill on production-sensitive files in the first run.
+Test it on something benign first.
 
 ---
 
@@ -156,7 +180,11 @@ This tool came out of a real iterative audit cycle: a pair of LLMs sparring over
 - **Diffs, not opinions.** When a fix exists, output the exact replacement.
 - **Refusal is a real outcome.** Some skills don't deserve a patch.
 
-The static rules in `scripts/scan.py` are line-based and miss multiline constructs by design — the LLM-driven steps in `SKILL.md` cover the remaining context-dependent semantics. Together they cover roughly 95% of the failure modes seen in real-world skill submissions; the remaining 5% require either a more sophisticated dynamic analyzer or human judgment.
+The static rules in `scripts/scan.py` are line-based and miss multiline
+constructs by design — the LLM-driven steps in `SKILL.md` cover the remaining
+context-dependent semantics. Together they cover roughly 95% of the failure
+modes seen in real-world skill submissions; the remaining 5% require either
+a more sophisticated dynamic analyzer or human judgment.
 
 ---
 

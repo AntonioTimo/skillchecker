@@ -1,0 +1,89 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Allow manual runs from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  examples:
+    name: example skills smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Syntax check scan.py
+        run: |
+          python3 -c "import ast; ast.parse(open('scripts/scan.py').read())"
+
+      - name: clean-skill must exit 0 (GREEN)
+        run: |
+          set +e
+          python3 scripts/scan.py examples/clean-skill/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::clean-skill should exit 0 (GREEN), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          echo "::notice::clean-skill: exit 0 (GREEN) ✓"
+
+      - name: evil-skill must exit 3 (RED)
+        run: |
+          set +e
+          python3 scripts/scan.py examples/evil-skill/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 3 ]; then
+            echo "::error::evil-skill should exit 3 (RED), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          echo "::notice::evil-skill: exit 3 (RED) ✓"
+
+      - name: evil-skill must produce expected finding categories
+        run: |
+          python3 scripts/scan.py examples/evil-skill/ > /tmp/out.json 2>&1 || true
+          # Check we caught at least one of each major class
+          python3 <<'PY'
+          import json, sys
+          with open("/tmp/out.json") as f:
+              data = json.load(f)
+          findings = data["findings"]
+          rules = {f["rule_id"] for f in findings}
+          # Required catches (representative of major attack classes)
+          required = {
+              "FM005": "Bash(* *) frontmatter",
+              "CR006": "~/.ssh access",
+              "CR020": "sudo in code",
+              "CR026": "exfiltration endpoint",
+              "CR028": "anti-user instruction",
+              "CR031": "role confusion",
+          }
+          missing = [(k, v) for k, v in required.items() if k not in rules]
+          if missing:
+              print("::error::evil-skill missing expected catches:")
+              for rule, why in missing:
+                  print(f"  - {rule} ({why})")
+              sys.exit(1)
+          print(f"All {len(required)} required attack-class catches present.")
+          PY
+
+      - name: Self-audit syntax integrity
+        run: |
+          # Just run scanner against itself to ensure no exceptions.
+          # We don't assert exit code (self-audit is documented to flag
+          # references/* and scripts/scan.py — see SKILL.md Limitations §5).
+          python3 scripts/scan.py . > /dev/null 2>&1
+          echo "Self-audit completed without runtime errors."

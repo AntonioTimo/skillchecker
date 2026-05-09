@@ -1,7 +1,10 @@
 ---
 name: example-clean
-description: A minimal example skill that demonstrates safe defaults. It counts the words in a given text file. Use this as a baseline for what a clean skill looks like.
-when_to_use: Trigger phrases — "count words in", "how many words", "word count for"
+description: >-
+  A minimal example skill that demonstrates safe defaults. It counts the words
+  in a given text file. Use this as a baseline for what a clean skill looks like.
+when_to_use: >-
+  Trigger phrases — "count words in", "how many words", "word count for"
 disable-model-invocation: true
 context: fork
 agent: general-purpose
