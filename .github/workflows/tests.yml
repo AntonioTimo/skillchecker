@@ -8,6 +8,12 @@ on:
   # Allow manual runs from the Actions tab
   workflow_dispatch:
 
+# GitHub Actions runners are migrating from Node.js 20 to Node.js 24 in 2026.
+# This env opts every JS action into Node 24 mode, removing the deprecation
+# warning and ensuring forward compatibility.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   examples:
     name: example skills smoke test
@@ -80,10 +86,19 @@ jobs:
           print(f"All {len(required)} required attack-class catches present.")
           PY
 
-      - name: Self-audit syntax integrity
+      - name: Self-audit smoke test (no crash)
         run: |
-          # Just run scanner against itself to ensure no exceptions.
-          # We don't assert exit code (self-audit is documented to flag
-          # references/* and scripts/scan.py — see SKILL.md Limitations §5).
+          # Self-audit IS expected to flag references/*.md (documentation of
+          # attack patterns) and scripts/scan.py (literal regex strings of
+          # the rules) — see SKILL.md Limitations §5. We don't assert on
+          # finding counts or exit code; we only verify the scanner runs
+          # to completion without runtime errors (anything > 5 means crash).
+          set +e
           python3 scripts/scan.py . > /dev/null 2>&1
-          echo "Self-audit completed without runtime errors."
+          rc=$?
+          set -e
+          if [ "$rc" -gt 5 ]; then
+            echo "::error::scan.py crashed during self-audit (exit $rc)"
+            exit 1
+          fi
+          echo "::notice::self-audit completed cleanly (exit $rc, expected non-zero)"
