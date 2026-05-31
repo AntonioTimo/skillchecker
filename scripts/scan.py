@@ -504,6 +504,171 @@ def check_frontmatter(skill_md: Path, root: Path) -> list[Finding]:
     return findings
 
 
+# --------------------------------------------------------------------------
+# Bundled configuration audit (hooks / MCP / settings)
+#
+# A skill is expected to contain SKILL.md + optional scripts/ + references/.
+# Config files shipped *alongside* it can execute code or rewrite the user's
+# Claude Code environment the moment the harness loads them — with no
+# allowed-tools entry. The dangerous part is the PRESENCE of a hook / server,
+# not the command string, so the line-based rules miss it entirely. We detect
+# it structurally: parse the JSON and inspect keys.
+#
+# Parsing uses json.loads only — it NEVER executes code (unlike pickle /
+# yaml.load). If a file won't parse (JSONC comments, trailing commas) we fall
+# back to a textual key search and say so in the finding.
+# --------------------------------------------------------------------------
+
+BUNDLED_SETTINGS_NAMES = {"settings.json", "settings.local.json"}
+BUNDLED_MCP_NAMES = {".mcp.json", "mcp.json"}
+BUNDLED_PLUGIN_NAMES = {"plugin.json"}
+# Directories that are non-standard for a *skill* and can carry executable config.
+NONSTANDARD_DIRS = ("hooks", "commands", "agents", ".claude", ".claude-plugin")
+
+
+def _read_text_safe(path: Path):
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _parse_json(path: Path):
+    """Return (data, error_or_None). Never executes code — json.loads only."""
+    text = _read_text_safe(path)
+    if text is None:
+        return None, "could not read file"
+    try:
+        return json.loads(text), None
+    except ValueError as e:  # JSONDecodeError is a subclass of ValueError
+        return None, f"not valid JSON ({e})"
+
+
+def _mentions_key(path: Path, key: str) -> bool:
+    """Textual backstop for files that won't parse as JSON."""
+    text = _read_text_safe(path)
+    if text is None:
+        return False
+    return re.search(r'"' + re.escape(key) + r'"\s*:', text) is not None
+
+
+def check_bundled_config(skill_root: Path) -> list[Finding]:
+    """Detect bundled settings/MCP/plugin config that can execute code or alter
+    the user's environment. Emits Findings directly, like check_frontmatter."""
+    findings: list[Finding] = []
+
+    # Locate candidate config files at root and one level into .claude/ and
+    # .claude-plugin/. Never follow symlinks.
+    search_dirs = [skill_root, skill_root / ".claude", skill_root / ".claude-plugin"]
+    candidates: list[Path] = []
+    for d in search_dirs:
+        if d.is_symlink() or not d.is_dir():
+            continue
+        for p in sorted(d.iterdir()):
+            if p.is_symlink() or not p.is_file():
+                continue
+            if (p.name in BUNDLED_SETTINGS_NAMES
+                    or p.name in BUNDLED_MCP_NAMES
+                    or p.name in BUNDLED_PLUGIN_NAMES):
+                candidates.append(p)
+
+    for path in candidates:
+        rel = path.relative_to(skill_root).as_posix()
+        data, err = _parse_json(path)
+        is_dict = isinstance(data, dict)
+        is_settings = path.name in BUNDLED_SETTINGS_NAMES
+        note = "" if err is None else f"; could not parse JSON, matched textually ({err})"
+
+        # ---- hooks -> CR032 (CRITICAL) ----
+        if (is_dict and data.get("hooks")) or (data is None and _mentions_key(path, "hooks")):
+            findings.append(Finding(
+                severity="CRITICAL", rule_id="CR032", file=rel, line=0,
+                snippet='"hooks": { ... }',
+                why=("Bundled config installs a Claude Code hook — the harness runs its "
+                     "shell command automatically on tool/lifecycle events, with no "
+                     "allowed-tools entry, and it persists after the skill is deleted" + note),
+                suggested_fix=("Refuse. A skill must not ship hooks. If the user wants one, "
+                               "they add it to their own settings explicitly, after reading "
+                               "the command."),
+            ))
+
+        # ---- mcpServers -> CR033 (stdio) / HI017 (remote) ----
+        mcp = data.get("mcpServers") if is_dict else None
+        if isinstance(mcp, dict):
+            for name, srv in mcp.items():
+                if not isinstance(srv, dict):
+                    continue
+                if srv.get("command"):
+                    findings.append(Finding(
+                        severity="CRITICAL", rule_id="CR033", file=rel, line=0,
+                        snippet=f'mcpServers.{name}.command = {srv.get("command")!r}',
+                        why=("Bundled config registers a stdio MCP server that launches a "
+                             "local process on session start — arbitrary code execution, no "
+                             "allowed-tools entry needed"),
+                        suggested_fix="Refuse. A skill must not ship a process-launching MCP server.",
+                    ))
+                elif srv.get("url"):
+                    findings.append(Finding(
+                        severity="HIGH", rule_id="HI017", file=rel, line=0,
+                        snippet=f'mcpServers.{name}.url = {srv.get("url")!r}',
+                        why=("Bundled config registers a remote MCP server — data egress to a "
+                             "third-party endpoint on session start"),
+                        suggested_fix=("Remove. If the user wants this server they add it "
+                                       "themselves after reviewing the URL."),
+                    ))
+        elif data is None and _mentions_key(path, "mcpServers"):
+            findings.append(Finding(
+                severity="HIGH", rule_id="HI017", file=rel, line=0,
+                snippet='"mcpServers": { ... }',
+                why=(f"Bundled config references an MCP server but won't parse as JSON ({err}) "
+                     "— inspect manually"),
+                suggested_fix="Inspect the mcpServers block by hand.",
+            ))
+
+        # ---- permissions broadening (settings only) -> HI018 ----
+        broad_perms = False
+        if is_settings and is_dict and isinstance(data.get("permissions"), dict):
+            perms = data["permissions"]
+            if perms.get("allow") or perms.get("defaultMode") in ("bypassPermissions", "acceptEdits"):
+                broad_perms = True
+        if broad_perms:
+            findings.append(Finding(
+                severity="HIGH", rule_id="HI018", file=rel, line=0,
+                snippet='"permissions": { ... }',
+                why=("Bundled settings widen the permission allow-list or relax the default "
+                     "permission mode — silent privilege broadening"),
+                suggested_fix=("Remove the permissions block. Permission scope is the user's "
+                               "call, not the skill's."),
+            ))
+
+        # ---- benign settings file still shouldn't be shipped -> ME010 ----
+        if (is_settings and is_dict and not data.get("hooks")
+                and not data.get("mcpServers") and not broad_perms):
+            keys = ", ".join(sorted(str(k) for k in data.keys())) or "(empty)"
+            findings.append(Finding(
+                severity="MEDIUM", rule_id="ME010", file=rel, line=0,
+                snippet=keys[:200],
+                why=("Skill ships a settings.json. Even with benign keys, a skill should not "
+                     "rewrite the user's Claude Code settings"),
+                suggested_fix="Remove the bundled settings file.",
+            ))
+
+    # ---- non-standard dirs (inventory-level note) -> INV002 ----
+    for d in NONSTANDARD_DIRS:
+        p = skill_root / d
+        if p.is_dir() and not p.is_symlink():
+            findings.append(Finding(
+                severity="MEDIUM", rule_id="INV002", file=d + "/", line=0,
+                snippet="",
+                why=("Non-standard directory for a skill (standard layout is SKILL.md + "
+                     "scripts/ + references/). Hook/command/agent/plugin dirs can carry their "
+                     "own executable config — review the contents."),
+                suggested_fix="Confirm why a skill ships this directory.",
+            ))
+
+    return findings
+
+
 def inventory(skill_root: Path) -> dict:
     """Walk the skill dir and classify every file."""
     text_files: list[str] = []
@@ -564,6 +729,9 @@ def main() -> int:
 
     # Frontmatter pass
     findings.extend(check_frontmatter(skill_md, skill_root))
+
+    # Bundled config / hooks / MCP pass (structural — parses JSON, never executes)
+    findings.extend(check_bundled_config(skill_root))
 
     # Per-file pass
     for rel in inv["text_files"]:
