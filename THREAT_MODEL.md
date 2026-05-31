@@ -29,6 +29,7 @@ Examples currently covered:
 | Credential theft | Reading `~/.ssh`, `~/.aws`, `~/.gnupg`, keychain, `.env`, `*.pem`, `id_rsa`, `.netrc`, `.npmrc`, `.pypirc`, `.kube/config` | CR006–CR014, CR025 |
 | Persistence | Writing to `~/.bashrc`, `~/.gitconfig`, git hooks, npm `postinstall`, cron, launchd | CR022, CR023 |
 | Skill self-elevation | Writing to `~/.claude/settings.json`, other skills, MCP config | CR024 |
+| Bundled config exec | Shipped `hooks`, or stdio `mcpServers` (`command`), in `settings.json` / `.mcp.json` / `plugin.json` | CR032, CR033 |
 | Code-from-data RCE | `pickle.loads`/`marshal.loads`/`yaml.load` over external data, `eval(base64.b64decode(...))`, dynamic `__import__` with concatenation | CR015–CR019 |
 | Pipe-to-shell | `curl ... \| sh`, `bash <(curl ...)`, `eval $(...)` | CR001–CR005 |
 | Interpreter injection | `bash -c "$VAR"`, `python -c "$VAR"`, `node -e "$VAR"` | CR027 |
@@ -59,6 +60,10 @@ Examples:
 | Network calls without hardcoded destination | HIGH | HI009 |
 | Recursive scans of home or root | HIGH | HI015 |
 | JS dynamic execution (`Function()`, `vm.runIn`, `Buffer.from(..., 'base64')` + eval) | HIGH | HI016 |
+| Bundled remote MCP server (`mcpServers` with `url`) | HIGH | HI017 |
+| Bundled `permissions` allow-list / mode broadening | HIGH | HI018 |
+| Bundled benign `settings.json` (no hooks / MCP) | MEDIUM | ME010 |
+| Non-standard plugin dir (`hooks/`, `commands/`, `agents/`, `.claude/`) | MEDIUM | INV002 |
 | `$0` used as `$1` for arguments | MEDIUM | ME001 |
 | Predictable `/tmp/` paths without `mktemp` | MEDIUM | ME002 |
 | Path traversal via unvalidated slug | MEDIUM | ME003 |
@@ -83,6 +88,7 @@ We deliberately do **not** flag these:
 - **`cat`, `head`, `grep` over user-supplied paths.** Read-only, no exfiltration risk unless combined with network calls (caught separately).
 - **YAML folded scalar in frontmatter** (`description: >-`). ME006's single-line length check is suppressed when YAML structural syntax indicates the value continues on the next lines.
 - **Defensive prose with negation in front of dangerous phrase** ("do not retry with relaxed limits", "skill must never tell the user"). CR028–CR031 use position-based negation guards.
+- **`hooks` / `mcpServers` / `command` keys in *prose* or *data files*.** Only an actual bundled config file (`settings.json`, `.mcp.json`, `plugin.json`) is flagged (CR032/CR033). A `references/*.json` data file or documentation mentioning these keys does not match — the audit keys off config filenames, not a blind word search.
 
 ---
 
