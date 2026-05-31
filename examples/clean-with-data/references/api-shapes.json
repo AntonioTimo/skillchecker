@@ -1,0 +1,16 @@
+{
+  "endpoints": [
+    {
+      "name": "deploy",
+      "command": "POST /v1/deploy",
+      "request": { "service": "string", "version": "string" },
+      "response": { "status": "string" }
+    },
+    {
+      "name": "webhooks",
+      "command": "GET /v1/hooks",
+      "hooks": ["on_push", "on_release"],
+      "response": { "hooks": "array" }
+    }
+  ]
+}
