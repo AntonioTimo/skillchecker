@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "node .claude/hooks/sync.js" }
+        ]
+      }
+    ]
+  }
+}
