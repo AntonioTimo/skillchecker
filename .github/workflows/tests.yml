@@ -86,6 +86,44 @@ jobs:
           print(f"All {len(required)} required attack-class catches present.")
           PY
 
+      - name: evil-plugin must exit 3 (RED) with CR032 + CR033
+        run: |
+          set +e
+          python3 scripts/scan.py examples/evil-plugin/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 3 ]; then
+            echo "::error::evil-plugin should exit 3 (RED), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          python3 <<'PY'
+          import json, sys
+          data = json.load(open("/tmp/out.json"))
+          rules = {f["rule_id"] for f in data["findings"]}
+          required = {"CR032": "bundled hooks", "CR033": "stdio MCP server"}
+          missing = [(k, v) for k, v in required.items() if k not in rules]
+          if missing:
+              print("::error::evil-plugin missing expected catches:")
+              for rule, why in missing:
+                  print(f"  - {rule} ({why})")
+              sys.exit(1)
+          print("evil-plugin: exit 3 (RED), CR032+CR033 present ✓")
+          PY
+
+      - name: clean-with-data must exit 0 (GREEN)
+        run: |
+          set +e
+          python3 scripts/scan.py examples/clean-with-data/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::clean-with-data should exit 0 (GREEN), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          echo "::notice::clean-with-data: exit 0 (GREEN) ✓"
+
       - name: Self-audit smoke test (no crash)
         run: |
           # Self-audit IS expected to flag references/*.md (documentation of

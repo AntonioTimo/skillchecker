@@ -109,8 +109,50 @@ Inventory is produced by `scan.py` in Step 2 — it lists every file under `$SKI
 
 Read the scanner output's `inventory` field after Step 2 and call out:
 - **Binary or non-text files** → strong RED indicator. A skill should be plain text. Compiled blobs are unauditable.
-- **Files outside the standard layout** (`SKILL.md` + `scripts/` + `references/`) → flag and ask why.
+- **Files outside the standard layout** (`SKILL.md` + `scripts/` + `references/`) → flag and ask why. Bundled config files (`settings.json`, `.mcp.json`, `plugin.json`) and plugin dirs (`hooks/`, `commands/`, `agents/`, `.claude/`) are audited in **Step 1.5**.
 - **Symlinks** anywhere in the skill → flag (`INV001`). Don't follow them.
+
+---
+
+## Step 1.5 — Bundled configuration audit (hooks / MCP / settings)
+
+A skill is supposed to be `SKILL.md` + optional `scripts/` + `references/`.
+Anything else in the directory can be **executable configuration the Claude Code
+harness activates on install — with no `allowed-tools` entry**:
+
+- `settings.json` / `.claude/settings.json` carrying a `hooks` block. Hooks run a
+  shell command **automatically** on lifecycle events (`PreToolUse`,
+  `PostToolUse`, `SessionStart`, …). A bundled hook is RCE + persistence: it fires
+  on events the user never connects to the skill and survives deleting the body.
+- `.mcp.json` / `mcp.json` (or a `mcpServers` block) registering an MCP server. A
+  stdio server (`command`/`args`) launches an arbitrary local binary; a remote
+  server (`url`) ships data to a third party.
+- `.claude-plugin/plugin.json` declaring any of the above.
+
+`scan.py` parses these structurally (`check_bundled_config`, safe `json.loads` —
+never executes) and emits:
+
+| Rule | Finding | Severity |
+|---|---|---|
+| `CR032` | bundled `hooks` block | CRITICAL → RED |
+| `CR033` | stdio `mcpServers` (`command`) | CRITICAL → RED |
+| `HI017` | remote `mcpServers` (`url`) | HIGH |
+| `HI018` | `permissions` allow-list / mode broadening | HIGH |
+| `ME010` | benign bundled `settings.json` | MEDIUM |
+| `INV002` | `hooks/`, `commands/`, `agents/`, `.claude/`, `.claude-plugin/` dir | MEDIUM note |
+
+**LLM-side judgment:** a `CR033` MCP `command` pointing at a script *inside the
+skill* is still RCE — the author controls that script. Refuse. A `HI017` remote
+`url` may be legitimate, but adding an MCP server is the **user's** decision,
+never the skill's — recommend removal and let the user add it themselves. The
+presence of *any* `hooks` block is disqualifying regardless of what the command
+appears to do — presence, not contents, is the threat.
+
+**The trap this closes:** a skill whose `SKILL.md` is spotlessly clean can still
+own the machine through a one-line `.claude/settings.json` hook. The line-based
+rules (Step 2) never see it — the command string is innocuous in isolation. Only
+this structural pass catches it. If `check_bundled_config` fires `CR032`/`CR033`,
+the verdict is 🔴 RED no matter how clean everything else looks.
 
 ---
 

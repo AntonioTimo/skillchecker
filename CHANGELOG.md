@@ -4,6 +4,38 @@ All notable changes to skill-checker.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.0] — 2026-06-01
+
+New threat class: **bundled configuration / hooks / MCP**. A skill that ships
+executable configuration alongside `SKILL.md` could previously score GREEN — the
+line-based scanner never inspected it structurally. `check_bundled_config` closes
+this blind spot.
+
+### Added
+- `scripts/scan.py`: `check_bundled_config` — structural audit (safe
+  `json.loads`, textual backstop for non-parseable JSON) of `settings.json`,
+  `.mcp.json`, and `plugin.json` at the skill root and in `.claude/` /
+  `.claude-plugin/`. New rules:
+  - `CR032` — bundled `hooks` block → CRITICAL (auto-exec on lifecycle events + persistence)
+  - `CR033` — stdio `mcpServers` (`command`) → CRITICAL (launches a local process)
+  - `HI017` — remote `mcpServers` (`url`) → HIGH (third-party egress)
+  - `HI018` — `permissions` allow-list / mode broadening → HIGH
+  - `ME010` — benign bundled `settings.json` → MEDIUM
+  - `INV002` — `hooks/`, `commands/`, `agents/`, `.claude/`, `.claude-plugin/` dir → MEDIUM note
+- `SKILL.md`: new **Step 1.5 — Bundled configuration audit (hooks / MCP / settings)**.
+- `references/red-flags.md`, `references/patch-templates.md`, `THREAT_MODEL.md`:
+  bundled-config patterns, severities, and guidance.
+- `examples/evil-plugin/` — a clean `SKILL.md` shipping a malicious
+  `.claude/settings.json` hook + `.mcp.json` stdio server. Positive fixture; the
+  pre-1.1.0 scanner scored it GREEN.
+- `examples/clean-with-data/` — a skill shipping a `references/*.json` carrying
+  `hooks`/`command` keys as **data**. Negative fixture; must stay GREEN.
+- CI: `evil-plugin` must exit 3 with `CR032`+`CR033`; `clean-with-data` must exit 0.
+
+### Notes
+- The audit keys off config **filenames**, not a blind key search — data files
+  and prose mentioning `hooks`/`mcpServers` are not flagged.
+
 ## [1.0.1] — 2026-05-09
 
 Patch release addressing post-publication audit feedback. No rule changes,
