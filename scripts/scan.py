@@ -15,6 +15,7 @@ This script never executes any file from the audited skill.
 It opens files for read only. No subprocess, no network, no writes.
 """
 
+import ast
 import json
 import os
 import re
@@ -669,6 +670,167 @@ def check_bundled_config(skill_root: Path) -> list[Finding]:
     return findings
 
 
+# --------------------------------------------------------------------------
+# Python AST pass
+#
+# The regex pass is line-based, so it misses dangerous calls that are aliased
+# (`e = eval; e(x)`), split across lines (`subprocess.run(\n  cmd,\n  shell=True)`),
+# or built dynamically (`getattr(os, "sys" + "tem")`). ast.parse builds the syntax
+# tree WITHOUT executing the code, and the tree is immune to surface layout — a
+# call is one Call node however it is written. This pass resolves call targets
+# structurally.
+#
+# It NEVER executes the audited code (ast.parse only). If the source won't parse
+# (syntax error, Python 2, non-Python), the pass degrades to a no-op and the
+# regex pass still applies. It also distinguishes a string literal "eval(" from a
+# real eval() call, so it does not reproduce the regex self-audit false positives.
+# --------------------------------------------------------------------------
+
+_CODE_EXEC_BUILTINS = {"eval", "exec", "compile"}
+
+
+def _dotted_name(node):
+    """Resolve a func/expr node to a dotted name ('os.system', 'eval').
+    Returns None if it is not a plain Name/Attribute chain."""
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return None
+
+
+def _is_literal(node):
+    """True if the node is a constant or a literal container of constants."""
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return all(_is_literal(e) for e in node.elts)
+    if isinstance(node, ast.Dict):
+        return all(
+            (k is None or _is_literal(k)) and _is_literal(v)
+            for k, v in zip(node.keys, node.values)
+        )
+    return False  # Name, Call, BinOp, JoinedStr (f-string), … → dynamic
+
+
+def _uses_constructor(node):
+    """True if the expression contains chr() / bytes.fromhex / codecs.decode /
+    x.join(...) — signals a string assembled from data (obfuscation)."""
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            n = _dotted_name(sub.func)
+            if n in ("chr", "bytes.fromhex", "codecs.decode") or (n and n.endswith(".join")):
+                return True
+    return False
+
+
+class _AstAuditor(ast.NodeVisitor):
+    def __init__(self, rel, src, alias):
+        self.rel = rel
+        self.src = src
+        self.alias = alias        # name -> builtin it aliases
+        self.findings = []
+
+    def _add(self, node, rule_id, severity, why, fix=""):
+        try:
+            seg = ast.get_source_segment(self.src, node) or ""
+        except Exception:
+            seg = ""
+        seg = " ".join(seg.split())
+        if len(seg) > 120:
+            seg = seg[:117] + "..."
+        self.findings.append(Finding(
+            severity=severity, rule_id=rule_id, file=self.rel,
+            line=getattr(node, "lineno", 0), snippet=seg, why=why,
+            suggested_fix=fix,
+        ))
+
+    def visit_Call(self, node):
+        name = _dotted_name(node.func)
+        arg0 = node.args[0] if node.args else None
+
+        if name in _CODE_EXEC_BUILTINS:
+            if arg0 is not None and _uses_constructor(arg0):
+                self._add(node, "AST008", "CRITICAL",
+                          name + "() over a string built from char codes / decoded bytes — obfuscated payload execution")
+            elif arg0 is None or not _is_literal(arg0):
+                self._add(node, "AST001", "CRITICAL",
+                          name + "() over a non-literal argument — dynamic code execution")
+
+        elif name in self.alias:
+            self._add(node, "AST002", "CRITICAL",
+                      "call to '" + name + "', an alias of " + self.alias[name] + "() — hidden dynamic code execution")
+
+        elif name in ("os.system", "os.popen"):
+            nonlit = arg0 is not None and not _is_literal(arg0)
+            self._add(node, "AST003", "CRITICAL" if nonlit else "HIGH",
+                      name + "()" + (" with a non-literal command — command injection" if nonlit else " — shell execution"))
+
+        elif name is not None and name.startswith("subprocess."):
+            shell_true = any(
+                kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True
+                for kw in node.keywords
+            )
+            if shell_true:
+                nonlit = arg0 is not None and not _is_literal(arg0)
+                self._add(node, "AST003", "CRITICAL" if nonlit else "HIGH",
+                          name + "(..., shell=True)" + (" with a non-literal command — command injection" if nonlit else " — prefer an argument list over shell=True"))
+
+        elif name in ("pickle.loads", "marshal.loads"):
+            self._add(node, "AST004", "CRITICAL",
+                      name + "() deserializes arbitrary objects — remote code execution")
+
+        elif name == "yaml.load":
+            safe = any(
+                kw.arg == "Loader" and "Safe" in (_dotted_name(kw.value) or "")
+                for kw in node.keywords
+            )
+            if not safe:
+                self._add(node, "AST005", "HIGH",
+                          "yaml.load() without SafeLoader — RCE on crafted YAML; use yaml.safe_load")
+
+        elif name == "getattr":
+            if len(node.args) >= 2 and not _is_literal(node.args[1]):
+                self._add(node, "AST006", "HIGH",
+                          "getattr() with a non-literal attribute name — dynamic dispatch can reach dangerous methods (e.g. os.system)")
+
+        elif name in ("__import__", "importlib.import_module"):
+            if arg0 is not None and not _is_literal(arg0):
+                self._add(node, "AST007", "HIGH",
+                          name + "() with a non-literal module name — dynamic import")
+
+        self.generic_visit(node)
+
+
+def ast_scan(path: Path, rel: str) -> list[Finding]:
+    """AST pass for a single .py file. Parses with ast.parse (never executes);
+    degrades to a no-op if the source will not parse."""
+    text = _read_text_safe(path)
+    if text is None:
+        return []
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return []
+
+    # Pass 1 — alias map: `x = eval` / `x = exec` / `x = compile`.
+    alias = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name) \
+                and node.value.id in _CODE_EXEC_BUILTINS:
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    alias[tgt.id] = node.value.id
+
+    # Pass 2 — detect.
+    auditor = _AstAuditor(rel, text, alias)
+    auditor.visit(tree)
+    return auditor.findings
+
+
 def inventory(skill_root: Path) -> dict:
     """Walk the skill dir and classify every file."""
     text_files: list[str] = []
@@ -733,9 +895,11 @@ def main() -> int:
     # Bundled config / hooks / MCP pass (structural — parses JSON, never executes)
     findings.extend(check_bundled_config(skill_root))
 
-    # Per-file pass
+    # Per-file pass (regex) + AST pass for Python files
     for rel in inv["text_files"]:
         findings.extend(scan_file(skill_root / rel, skill_root))
+        if rel.endswith(".py"):
+            findings.extend(ast_scan(skill_root / rel, rel))
 
     # Note any non-text or symlink files (Claude-side review treats these as red flags)
     for other in inv["other_files"]:
