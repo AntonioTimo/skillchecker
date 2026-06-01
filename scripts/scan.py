@@ -180,6 +180,14 @@ CRITICAL_RULES = [
               r"(?:document|file|input|book|content|attachment)",
      "Role confusion — skill asks the model to treat untrusted input as instructions",
      "Refuse. This is the prompt-injection vulnerability the skill should be defending against, not enabling."),
+
+    ("CR034", r"(?:trycloudflare\.com|\.loca\.lt|serveo\.net|lhr\.life|localhost\.run|\.oast\.(?:fun|live|site|pro|me)|pipedream\.net|beeceptor\.com|requestcatcher\.com|\.telebit\.(?:io|me)|tunnelto\.dev)",
+     "Tunneling / OOB-interaction service — points at an attacker-controlled box; data exfiltration channel",
+     "Refuse unless the skill is explicitly and transparently a tunnel helper."),
+
+    ("CR035", r"\b(?:env|printenv)\b[^\n|]*\|[^\n]*\b(?:curl|wget|nc|ncat|netcat|telnet)\b",
+     "Environment dump piped to a network tool — wholesale exfiltration of secrets held in env vars",
+     "Refuse."),
 ]
 
 HIGH_RULES = [
@@ -242,6 +250,18 @@ HIGH_RULES = [
     ("HI016", r"\bFunction\s*\(|\bBuffer\.from\s*\([^)]*[\"']base64[\"']\s*\)|\bvm\.runIn",
      "JavaScript dynamic code execution / base64 decode — common obfuscation pattern",
      "Refuse if used over non-literal input."),
+
+    ("HI019", r"https?://(?:\d{1,3}(?:\.\d{1,3}){3}|0x[0-9a-fA-F]{6,8}\b|\d{8,10}\b|\[[0-9A-Fa-f:]+\])",
+     "IP-literal or numeric-encoded IP in a URL — bypasses domain blocklists; a hardcoded public/encoded host is a common C2 / exfil pattern",
+     "Verify the destination. A public IP literal or an encoded IP (hex/decimal) is suspicious; prefer a named, documented endpoint."),
+
+    ("HI020", r"\$\{IFS\}|\$IFS\b",
+     "${IFS} shell space-substitution — evasion used to slip spaces past naive command filters",
+     "There is no legitimate reason to assemble commands with ${IFS} in a skill."),
+
+    ("HI021", r"api\.telegram\.org/bot",
+     "Telegram bot API — usable as a covert exfiltration channel; legitimate only for a skill whose declared purpose is a Telegram bot",
+     "Confirm the skill's stated purpose; otherwise treat as an exfil channel and refuse."),
 ]
 
 MEDIUM_RULES = [
@@ -280,6 +300,10 @@ MEDIUM_RULES = [
     ("ME009", r"(?i)(?:trust\s+me|this\s+is\s+safe|no\s+need\s+to\s+(?:inspect|review|check)|these\s+permissions\s+are\s+required|don'?t\s+worry\s+about)",
      "'Trust me' language — manipulation; safety should be argued from concrete constraints",
      "Replace with specific justifications for each permission requested."),
+
+    ("ME011", r"[A-Za-z0-9+/]{256,}={0,2}",
+     "Very long base64-like literal (>=256 chars) — possible embedded payload or obfuscated data",
+     "Decode and inspect; confirm it is benign data, not code or a hidden command."),
 ]
 
 LOW_RULES = [
@@ -402,6 +426,18 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                     # ME006's single-line length check doesn't apply.
                     if re.search(r"^description:\s*[>|][-+]?\s*$", line):
                         continue
+                if rule_id == "HI019":
+                    # Skip loopback / private / link-local dotted-quad IPs (local
+                    # dev URLs like http://127.0.0.1:8080). Encoded forms
+                    # (0x.../decimal/IPv6) are never skipped.
+                    m = re.search(r"https?://(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}", line)
+                    if m:
+                        a, b = int(m.group(1)), int(m.group(2))
+                        if (a in (0, 10, 127, 255)
+                                or (a == 192 and b == 168)
+                                or (a == 172 and 16 <= b <= 31)
+                                or (a == 169 and b == 254)):
+                            continue
                 if rule_id in ("CR020", "CR021"):
                     # Skip if match is inside a string literal that's an
                     # error/help message telling the user to install something
