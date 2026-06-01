@@ -30,6 +30,7 @@ Examples currently covered:
 | Persistence | Writing to `~/.bashrc`, `~/.gitconfig`, git hooks, npm `postinstall`, cron, launchd | CR022, CR023 |
 | Skill self-elevation | Writing to `~/.claude/settings.json`, other skills, MCP config | CR024 |
 | Bundled config exec | Shipped `hooks`, or stdio `mcpServers` (`command`), in `settings.json` / `.mcp.json` / `plugin.json` | CR032, CR033 |
+| Obfuscated code exec (AST) | Aliased/dynamic `eval`/`exec`, `os.system`/`subprocess` `shell=True` any layout, `pickle`/`marshal.loads`, char-built `exec` | AST001–AST004, AST008 |
 | Code-from-data RCE | `pickle.loads`/`marshal.loads`/`yaml.load` over external data, `eval(base64.b64decode(...))`, dynamic `__import__` with concatenation | CR015–CR019 |
 | Pipe-to-shell | `curl ... \| sh`, `bash <(curl ...)`, `eval $(...)` | CR001–CR005 |
 | Interpreter injection | `bash -c "$VAR"`, `python -c "$VAR"`, `node -e "$VAR"` | CR027 |
@@ -64,6 +65,8 @@ Examples:
 | Bundled `permissions` allow-list / mode broadening | HIGH | HI018 |
 | Bundled benign `settings.json` (no hooks / MCP) | MEDIUM | ME010 |
 | Non-standard plugin dir (`hooks/`, `commands/`, `agents/`, `.claude/`) | MEDIUM | INV002 |
+| `yaml.load` without SafeLoader, resolved via AST | HIGH | AST005 |
+| Dynamic `getattr` / `__import__` (AST) | HIGH | AST006, AST007 |
 | `$0` used as `$1` for arguments | MEDIUM | ME001 |
 | Predictable `/tmp/` paths without `mktemp` | MEDIUM | ME002 |
 | Path traversal via unvalidated slug | MEDIUM | ME003 |
@@ -89,6 +92,7 @@ We deliberately do **not** flag these:
 - **YAML folded scalar in frontmatter** (`description: >-`). ME006's single-line length check is suppressed when YAML structural syntax indicates the value continues on the next lines.
 - **Defensive prose with negation in front of dangerous phrase** ("do not retry with relaxed limits", "skill must never tell the user"). CR028–CR031 use position-based negation guards.
 - **`hooks` / `mcpServers` / `command` keys in *prose* or *data files*.** Only an actual bundled config file (`settings.json`, `.mcp.json`, `plugin.json`) is flagged (CR032/CR033). A `references/*.json` data file or documentation mentioning these keys does not match — the audit keys off config filenames, not a blind word search.
+- **`eval` / `exec` / `subprocess` as *string literals* in code (not calls).** The AST pass distinguishes a literal `"eval("` from an `eval()` call, so a scanner or linter that stores these patterns as strings (like skill-checker itself) is not flagged by `AST0xx`.
 
 ---
 
@@ -100,7 +104,7 @@ be aware and use complementary tooling.
 1. **Dynamic analysis.** A skill that fetches malicious code at runtime from a server it controls passes static checks. Mitigation: any skill with both network calls and writeable filesystem operations should be treated as RED regardless of static findings, and tested in a sandbox first.
 2. **Supply chain.** A malicious update to a third-party Python library imported by the skill is invisible to us. Pin and audit dependencies separately (e.g. with `pip-audit`).
 3. **Known CVEs in dependencies.** We don't check library versions against vulnerability databases.
-4. **Adversarial code mimicking benign patterns.** A sufficiently sophisticated attacker can shape code to slip past line-based regex. The LLM-driven steps in SKILL.md are the second line of defense; AST-based analysis (planned for v2.0.0) is the third.
+4. **Adversarial code mimicking benign patterns.** *Partially covered as of v1.2.0:* the Python AST pass (`AST0xx`) defeats the common evasions — aliased builtins, multi-line `shell=True`, dynamic `getattr`/`__import__`, char-built `exec`. A sufficiently sophisticated attacker can still slip past both regex and a single-pass AST (cross-function data flow, reflection on attacker-named modules); the LLM-driven steps in SKILL.md remain the backstop. Full taint/data-flow analysis is future work.
 5. **Author identity, reputation, repo history.** We audit code, not authors. A first-commit repo with five stars is treated identically to a five-year-old project from a known author. Repo metadata is the user's call.
 6. **Runtime sandboxing.** We are a pre-install gate, not a runtime monitor. Once installed, skills can do anything their `allowed-tools` permits.
 

@@ -267,6 +267,27 @@ Things to look for:
 - Symlink rejection on inputs and outputs
 - Timeouts on external calls
 
+**AST pass (`AST0xx` findings).** `scan.py` parses every `.py` file with
+`ast.parse` (no execution) and reports structural findings the line-based regex
+cannot see — they arrive in the same JSON:
+
+| Rule | Catches |
+|---|---|
+| `AST001` | `eval`/`exec`/`compile` over a non-literal argument |
+| `AST002` | a call to an **alias** of eval/exec/compile (`e = eval; e(x)`) |
+| `AST003` | `os.system` / `subprocess.*` with `shell=True`, at any line layout |
+| `AST004` | `pickle.loads` / `marshal.loads` |
+| `AST005` | `yaml.load` without `SafeLoader` |
+| `AST006` | `getattr(obj, <non-literal>)` — dynamic dispatch |
+| `AST007` | dynamic `__import__` / `importlib.import_module` |
+| `AST008` | `exec`/`eval` over a char-built / decoded string |
+
+The AST pass is why aliased and multi-line evasions no longer slip through, and
+because it distinguishes a string literal `"eval("` from a real `eval()` call it
+adds **no** false positives on skills that merely *document* these patterns (like
+this one). Treat `AST001`–`AST004`/`AST008` (CRITICAL) as RED, the rest as HIGH —
+same judgment as their regex equivalents.
+
 ---
 
 ## Step 5.5 — Tool laundering check (effective capability)

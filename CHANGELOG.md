@@ -4,6 +4,33 @@ All notable changes to skill-checker.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.2.0] — 2026-06-01
+
+New capability: a **Python AST pass**. The line-based regex misses dangerous
+calls that are aliased, split across lines, or built dynamically. `ast.parse`
+(no execution) sees the syntax tree regardless of surface layout.
+
+### Added
+- `scripts/scan.py`: `ast_scan` — walks each `.py` file's AST and reports:
+  - `AST001` — `eval`/`exec`/`compile` over a non-literal argument → CRITICAL
+  - `AST002` — a call to an alias of eval/exec/compile (`e = eval; e(x)`) → CRITICAL
+  - `AST003` — `os.system`/`os.popen`/`subprocess.*` with `shell=True`, any line layout → CRITICAL (non-literal command) / HIGH
+  - `AST004` — `pickle.loads` / `marshal.loads` → CRITICAL
+  - `AST005` — `yaml.load` without `SafeLoader` → HIGH
+  - `AST006` — `getattr(obj, <non-literal>)` dynamic dispatch → HIGH
+  - `AST007` — dynamic `__import__` / `importlib.import_module` → HIGH
+  - `AST008` — `exec`/`eval` over a char-built / decoded string → CRITICAL
+- `SKILL.md`: Step 5 documents the AST pass.
+- `THREAT_MODEL.md`: adversarial-bypass (out-of-scope #4) is now *partially covered*; AST rule rows added.
+- `references/red-flags.md`: AST section.
+- `examples/evil-ast/` — clean `SKILL.md`, evasive `helper.py` (aliased eval, dynamic `os.system`, multi-line `shell=True`, char-built `exec`). Pre-1.2.0 the scanner scored it a soft YELLOW.
+- `examples/clean-ast/` — safe Python (list-arg subprocess, `json.loads`, `yaml.safe_load`, literal `getattr`); stays GREEN.
+- CI: `evil-ast` must exit 3 with `AST001`/`AST002`/`AST003`; `clean-ast` must exit 0.
+
+### Notes
+- The AST pass degrades to a no-op on unparseable source (syntax error, Python 2, non-Python).
+- It distinguishes string literals from calls, so it adds no false positives on the scanner's own rule strings.
+
 ## [1.1.0] — 2026-06-01
 
 New threat class: **bundled configuration / hooks / MCP**. A skill that ships
