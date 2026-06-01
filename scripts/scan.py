@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -831,6 +832,130 @@ def ast_scan(path: Path, rel: str) -> list[Finding]:
     return auditor.findings
 
 
+# --------------------------------------------------------------------------
+# Unicode / invisible-character pass
+#
+# The regex and AST passes operate on text after it is read; they cannot see
+# characters that are invisible or that lie about how text renders. This pass
+# inspects raw codepoints across ALL text files, INCLUDING .md prose — a
+# SKILL.md's prose is read by the model as instructions, so hidden Unicode there
+# is a direct injection vector.
+# --------------------------------------------------------------------------
+
+# Overrides (RLO/LRO) are the Trojan-Source weapons → CRITICAL. Embeddings and
+# isolates can be legitimate in genuine RTL text but are also used in attacks → HIGH.
+_BIDI_OVERRIDE = {0x202D, 0x202E}
+_BIDI_OTHER = {0x202A, 0x202B, 0x202C, 0x2066, 0x2067, 0x2068, 0x2069, 0x200E, 0x200F}
+
+# Invisible / zero-width used to hide text or split a keyword past the regex.
+# ZWJ (200D) and variation selectors (FE0E/FE0F) are excluded so emoji don't trip it;
+# U+FEFF is handled separately (allowed only as a leading BOM).
+_INVISIBLE = {0x200B, 0x2060, 0x00AD}  # ZWSP, word joiner, soft hyphen
+
+# Cyrillic/Greek letters visually confusable with ASCII Latin (homoglyph spoofing).
+_CONFUSABLE = set(
+    "\u0430\u0435\u043e\u0440\u0441\u0443\u0445\u0455\u0456\u0458\u0501\u04bb"
+    "\u0410\u0412\u0415\u041a\u041c\u041d\u041e\u0420\u0421\u0422\u0423\u0425"
+    "\u03bf\u03b1\u03c1\u03bd\u03c5\u0391\u0392\u0395\u039f\u03a1"
+)
+
+
+def _charname(ch):
+    try:
+        return unicodedata.name(ch)
+    except ValueError:
+        return "<unnamed control char>"
+
+
+def _script_of(ch):
+    """Coarse script bucket for a letter: 'latin', 'cyrillic', 'greek', or None."""
+    o = ord(ch)
+    if (0x41 <= o <= 0x5A) or (0x61 <= o <= 0x7A):
+        return "latin"
+    if 0x0400 <= o <= 0x052F:
+        return "cyrillic"
+    if (0x0370 <= o <= 0x03FF) or (0x1F00 <= o <= 0x1FFF):
+        return "greek"
+    return None
+
+
+def unicode_scan(path: Path, rel: str) -> list[Finding]:
+    """Character-level scan for bidi controls, invisible characters, the Unicode
+    Tags block, and mixed-script (homoglyph) words. Reads text only."""
+    text = _read_text_safe(path)
+    if text is None:
+        return []
+    findings: list[Finding] = []
+
+    for i, line in enumerate(text.splitlines(), start=1):
+        for ch in line:
+            o = ord(ch)
+            if o in _BIDI_OVERRIDE:
+                findings.append(Finding(
+                    severity="CRITICAL", rule_id="UNI001", file=rel, line=i,
+                    snippet=f"U+{o:04X} {_charname(ch)}",
+                    why="Bidirectional override (Trojan Source) — reorders how the line renders vs. how it reads; can disguise or hide instructions in SKILL.md",
+                    suggested_fix="Remove it. A skill has no legitimate use for a bidi override.",
+                ))
+            elif o in _BIDI_OTHER:
+                findings.append(Finding(
+                    severity="HIGH", rule_id="UNI001", file=rel, line=i,
+                    snippet=f"U+{o:04X} {_charname(ch)}",
+                    why="Bidirectional embedding/isolate control — can reorder rendered text; rare outside genuine RTL content",
+                    suggested_fix="Remove unless the skill genuinely renders right-to-left text.",
+                ))
+            elif o in _INVISIBLE:
+                findings.append(Finding(
+                    severity="HIGH", rule_id="UNI002", file=rel, line=i,
+                    snippet=f"U+{o:04X} {_charname(ch)}",
+                    why="Invisible / zero-width character — can hide text or split a keyword to evade the line rules",
+                    suggested_fix="Remove it.",
+                ))
+            elif 0xE0000 <= o <= 0xE007F:
+                findings.append(Finding(
+                    severity="CRITICAL", rule_id="UNI003", file=rel, line=i,
+                    snippet=f"U+{o:04X} {_charname(ch)}",
+                    why="Unicode Tags block character — invisible; used to smuggle hidden instructions into model input",
+                    suggested_fix="Remove it. The Tags block has no legitimate use in skill text.",
+                ))
+
+        # UNI004 — homoglyph spoofing: a Cyrillic/Greek letter confusable with Latin
+        # sitting INSIDE a Latin word (a Latin neighbour, no Cyrillic/Greek neighbour).
+        # Catches 'paypal'/'sudo' spoofs while leaving genuine bilingual jargon (Latin
+        # glued to a Cyrillic cluster, e.g. za+inject+it) and hyphenated compounds alone.
+        for run in re.findall(r"[^\W\d_]+", line):
+            for j, c in enumerate(run):
+                if c not in _CONFUSABLE:
+                    continue
+                neigh = []
+                if j > 0:
+                    neigh.append(run[j - 1])
+                if j < len(run) - 1:
+                    neigh.append(run[j + 1])
+                scr = {_script_of(n) for n in neigh}
+                if "latin" in scr and not ({"cyrillic", "greek"} & scr):
+                    findings.append(Finding(
+                        severity="MEDIUM", rule_id="UNI004", file=rel, line=i,
+                        snippet=run[:60],
+                        why="Homoglyph spoofing: a Cyrillic/Greek look-alike (U+%04X) sits inside an otherwise-Latin word — disguised as Latin" % ord(c),
+                        suggested_fix="Use a single script per word, or confirm the spelling is intentional.",
+                    ))
+                    break
+
+    # U+FEFF mid-file (only a leading BOM at offset 0 is legitimate).
+    idx = text.find("\uFEFF", 1)
+    if idx != -1:
+        findings.append(Finding(
+            severity="HIGH", rule_id="UNI002", file=rel,
+            line=text.count("\n", 0, idx) + 1,
+            snippet="U+FEFF ZERO WIDTH NO-BREAK SPACE",
+            why="Zero-width no-break space mid-file (only a leading BOM is legitimate) — invisible character",
+            suggested_fix="Remove it.",
+        ))
+
+    return findings
+
+
 def inventory(skill_root: Path) -> dict:
     """Walk the skill dir and classify every file."""
     text_files: list[str] = []
@@ -895,9 +1020,10 @@ def main() -> int:
     # Bundled config / hooks / MCP pass (structural — parses JSON, never executes)
     findings.extend(check_bundled_config(skill_root))
 
-    # Per-file pass (regex) + AST pass for Python files
+    # Per-file pass (regex) + Unicode pass + AST pass for Python files
     for rel in inv["text_files"]:
         findings.extend(scan_file(skill_root / rel, skill_root))
+        findings.extend(unicode_scan(skill_root / rel, rel))
         if rel.endswith(".py"):
             findings.extend(ast_scan(skill_root / rel, rel))
 
