@@ -31,6 +31,7 @@ Examples currently covered:
 | Skill self-elevation | Writing to `~/.claude/settings.json`, other skills, MCP config | CR024 |
 | Bundled config exec | Shipped `hooks`, or stdio `mcpServers` (`command`), in `settings.json` / `.mcp.json` / `plugin.json` | CR032, CR033 |
 | Obfuscated code exec (AST) | Aliased/dynamic `eval`/`exec`, `os.system`/`subprocess` `shell=True` any layout, `pickle`/`marshal.loads`, char-built `exec` | AST001–AST004, AST008 |
+| Hidden Unicode injection | Bidi override (RLO/LRO) or Unicode Tags block — invisible/deceptive characters in SKILL.md prose | UNI001, UNI003 |
 | Code-from-data RCE | `pickle.loads`/`marshal.loads`/`yaml.load` over external data, `eval(base64.b64decode(...))`, dynamic `__import__` with concatenation | CR015–CR019 |
 | Pipe-to-shell | `curl ... \| sh`, `bash <(curl ...)`, `eval $(...)` | CR001–CR005 |
 | Interpreter injection | `bash -c "$VAR"`, `python -c "$VAR"`, `node -e "$VAR"` | CR027 |
@@ -67,6 +68,8 @@ Examples:
 | Non-standard plugin dir (`hooks/`, `commands/`, `agents/`, `.claude/`) | MEDIUM | INV002 |
 | `yaml.load` without SafeLoader, resolved via AST | HIGH | AST005 |
 | Dynamic `getattr` / `__import__` (AST) | HIGH | AST006, AST007 |
+| Zero-width / invisible characters | HIGH | UNI002 |
+| Bidi embedding/isolate; homoglyph word | HIGH / MEDIUM | UNI001, UNI004 |
 | `$0` used as `$1` for arguments | MEDIUM | ME001 |
 | Predictable `/tmp/` paths without `mktemp` | MEDIUM | ME002 |
 | Path traversal via unvalidated slug | MEDIUM | ME003 |

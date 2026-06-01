@@ -162,6 +162,44 @@ jobs:
           fi
           echo "::notice::clean-ast: exit 0 (GREEN) ✓"
 
+      - name: evil-unicode must exit 3 (RED) with UNI001 + UNI003
+        run: |
+          set +e
+          python3 scripts/scan.py examples/evil-unicode/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 3 ]; then
+            echo "::error::evil-unicode should exit 3 (RED), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          python3 <<'PY'
+          import json, sys
+          data = json.load(open("/tmp/out.json"))
+          rules = {f["rule_id"] for f in data["findings"]}
+          required = {"UNI001": "bidi override", "UNI003": "Unicode Tags block"}
+          missing = [(k, v) for k, v in required.items() if k not in rules]
+          if missing:
+              print("::error::evil-unicode missing expected catches:")
+              for rule, why in missing:
+                  print(f"  - {rule} ({why})")
+              sys.exit(1)
+          print("evil-unicode: exit 3 (RED), UNI001+UNI003 present OK")
+          PY
+
+      - name: clean-unicode must exit 0 (GREEN)
+        run: |
+          set +e
+          python3 scripts/scan.py examples/clean-unicode/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::clean-unicode should exit 0 (GREEN), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          echo "::notice::clean-unicode: exit 0 (GREEN) ✓"
+
       - name: Self-audit smoke test (no crash)
         run: |
           # Self-audit IS expected to flag references/*.md (documentation of
