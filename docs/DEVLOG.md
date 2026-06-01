@@ -13,7 +13,7 @@ docs → PR → squash-merge → GitHub release.
 | C | Bundled config / hooks / MCP | v1.1.0 | [#1](https://github.com/AntonioTimo/skillchecker/pull/1) | ✅ released |
 | A | Python AST pass | v1.2.0 | [#2](https://github.com/AntonioTimo/skillchecker/pull/2) | ✅ released |
 | B | Unicode / invisible characters | v1.3.0 | [#3](https://github.com/AntonioTimo/skillchecker/pull/3) | ✅ released |
-| D | Exfil / evasion breadth | v1.4.0 | — | 🚧 in progress |
+| D | Exfil / evasion breadth | v1.4.0 | [#4](https://github.com/AntonioTimo/skillchecker/pull/4) | ✅ released |
 
 ---
 
@@ -93,14 +93,24 @@ sequences; self-audit now clean. (The tool works — it caught the mistake.)
 self-audit clean; intentional homoglyph examples in the spec self-flag (documented
 caveat).
 
-## Phase D — Exfil / evasion breadth (v1.4.0, in progress)
+## Phase D — Exfil / evasion breadth (v1.4.0, PR #4)
 
 **Goal.** Close the modern exfil/evasion gaps the original signatures predate.
 
-**Planned rules.** `CR034` tunneling/OOB hosts (Cloudflare quick tunnels, serveo,
-localtunnel, interactsh), `CR035` env-var dump piped to the network, `HI019`
-IP-literal / numeric-encoded IP URLs (loopback/private guarded), `HI020` `${IFS}`
-shell evasion, `HI021` Telegram bot API channel, `ME011` long high-entropy blob
-(git SHAs guarded).
+**The gap (RED).** `examples/evil-exfil/` ships a Cloudflare quick tunnel, an
+`env`-to-network dump, numeric-encoded IP URLs, IFS-based space evasion, the
+Telegram bot API, and a long base64 blob. The pre-1.4.0 scanner scored it 🟢 GREEN.
 
-**Status.** Spec written; RED → GREEN → docs → PR next. Closes the v2 roadmap.
+**The fix (GREEN).** Six new regex rules in the existing lists: `CR034` tunneling/
+OOB hosts and `CR035` env-dump-to-network (CRITICAL); `HI019` IP-literal/encoded-IP
+URL, `HI020` IFS evasion, `HI021` Telegram API (HIGH); `ME011` long base64/hex
+blob (MEDIUM).
+
+**Key decisions.** `HI019` guards loopback / RFC1918 so local-dev URLs don't
+fire; `ME011`'s 256-char threshold keeps git SHAs and checksums clean. Both proven
+by `examples/clean-exfil/`.
+
+**Verified.** evil-exfil GREEN→RED (all six rules); clean-exfil GREEN; no
+regressions across the nine example fixtures.
+
+**Closes the v2 roadmap** — C, A, B, D all shipped.

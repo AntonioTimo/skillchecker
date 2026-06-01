@@ -4,6 +4,27 @@ All notable changes to skill-checker.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.4.0] — 2026-06-01
+
+New detections: **modern exfil / evasion breadth**. The original exfiltration
+signatures predate a wave of newer techniques. This closes the v2 roadmap.
+
+### Added
+- `scripts/scan.py`:
+  - `CR034` — tunneling / OOB-interaction hosts (Cloudflare quick tunnels, `serveo`, `localtunnel`, `localhost.run`, interactsh, `pipedream`, `beeceptor`, `requestcatcher`) → CRITICAL
+  - `CR035` — env-var dump piped to a network tool (`env`/`printenv` → `curl`/`wget`/`nc`) → CRITICAL
+  - `HI019` — IP-literal or numeric-encoded IP in a URL → HIGH (loopback & RFC1918 ranges guarded)
+  - `HI020` — IFS-based shell space-substitution evasion → HIGH
+  - `HI021` — Telegram bot API exfil channel → HIGH
+  - `ME011` — long (≥256) base64/hex literal → MEDIUM (git SHAs fall under the threshold)
+- `references/red-flags.md`, `references/patch-templates.md`, `THREAT_MODEL.md`: exfil/evasion rows.
+- `examples/evil-exfil/` — every new pattern; pre-1.4.0 it scored GREEN.
+- `examples/clean-exfil/` — loopback/private-IP URLs, a named HTTPS host, a git SHA; stays GREEN.
+- CI: `evil-exfil` must exit 3 with `CR034`+`CR035`; `clean-exfil` must exit 0.
+
+### Closed
+- The **v2 roadmap** is complete: bundled-config (1.1.0) → AST pass (1.2.0) → Unicode pass (1.3.0) → exfil/evasion (1.4.0).
+
 ## [1.3.0] — 2026-06-01
 
 New capability: a **Unicode / invisible-character pass**. The regex and AST

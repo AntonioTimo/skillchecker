@@ -26,6 +26,7 @@ Examples currently covered:
 | Class | Pattern | Rule IDs |
 |---|---|---|
 | Data exfiltration | Network calls to known anonymous webhook services (`webhook.site`, `requestbin`, `pastebin`, Discord/Slack webhooks, `ngrok`) | CR026 |
+| Modern exfil / evasion | Tunneling/OOB hosts, env-dump piped to network, IP-literal/encoded-IP URLs, IFS-based space evasion, Telegram bot API, long base64 blobs | CR034, CR035, HI019–HI021, ME011 |
 | Credential theft | Reading `~/.ssh`, `~/.aws`, `~/.gnupg`, keychain, `.env`, `*.pem`, `id_rsa`, `.netrc`, `.npmrc`, `.pypirc`, `.kube/config` | CR006–CR014, CR025 |
 | Persistence | Writing to `~/.bashrc`, `~/.gitconfig`, git hooks, npm `postinstall`, cron, launchd | CR022, CR023 |
 | Skill self-elevation | Writing to `~/.claude/settings.json`, other skills, MCP config | CR024 |
