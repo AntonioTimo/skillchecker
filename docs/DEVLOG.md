@@ -13,7 +13,7 @@ docs → PR → squash-merge → GitHub release.
 | C | Bundled config / hooks / MCP | v1.1.0 | [#1](https://github.com/AntonioTimo/skillchecker/pull/1) | ✅ released |
 | A | Python AST pass | v1.2.0 | [#2](https://github.com/AntonioTimo/skillchecker/pull/2) | ✅ released |
 | B | Unicode / invisible characters | v1.3.0 | [#3](https://github.com/AntonioTimo/skillchecker/pull/3) | ✅ released |
-| D | Exfil / evasion breadth | v1.4.0 | [#4](https://github.com/AntonioTimo/skillchecker/pull/4) | ✅ released |
+| D | Exfil / evasion breadth | v1.4.0 | [#4](https://github.com/AntonioTimo/skillchecker/pull/4) | 🚧 in review |
 
 ---
 
@@ -114,3 +114,18 @@ by `examples/clean-exfil/`.
 regressions across the nine example fixtures.
 
 **Closes the v2 roadmap** — C, A, B, D all shipped.
+
+### Post-review hardening (in PR #4)
+
+An external **Codex** review of the v2 branch found real gaps — all fixed before
+merge, each regression-tested by `examples/evil-bypass/` and broader CI asserts:
+
+- folded/list `allowed-tools` carrying `Bash(* *)` bypassed the wildcard check → `FM005` now scans the whole frontmatter;
+- the negation guard suppressed `CR028`–`CR031` on bare modals ("you **should** ignore safety") → only real negations count now;
+- `~~~` fences and inline code were under-scanned → both scanned as code;
+- `.git/` (and `node_modules/`, etc.) flooded `INV001` when auditing a clone → skipped;
+- documented `bash <(curl)` / `eval "$(curl)"` were not implemented → `CR036`/`CR037`;
+- the "read-only by design" claim was overstated (`echo` + redirect) → reworded honestly.
+
+Lesson logged: a security tool's worst failure is the **false negative** (a silent
+bypass that reads as 🟢). The review caught four of them before they shipped.

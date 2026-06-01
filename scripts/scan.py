@@ -188,6 +188,14 @@ CRITICAL_RULES = [
     ("CR035", r"\b(?:env|printenv)\b[^\n|]*\|[^\n]*\b(?:curl|wget|nc|ncat|netcat|telnet)\b",
      "Environment dump piped to a network tool — wholesale exfiltration of secrets held in env vars",
      "Refuse."),
+
+    ("CR036", r"(?:bash|sh|zsh|source|\.)\s+<\(\s*(?:curl|wget|fetch)\b",
+     "Process-substitution pipe-to-shell — runs unaudited remote code",
+     "Refuse. Patching is not enough; the skill is fetching and executing remote code."),
+
+    ("CR037", r"\beval\b[^\n]*\$\(\s*(?:curl|wget|fetch)\b",
+     "eval over a command-substituted remote fetch — runs unaudited remote code",
+     "Refuse."),
 ]
 
 HIGH_RULES = [
@@ -386,8 +394,9 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                 in_frontmatter = False
                 continue
 
-        # Toggle code-fence state for markdown files (only outside frontmatter)
-        if is_markdown and not in_frontmatter and re.match(r"^\s*```", line):
+        # Toggle code-fence state for markdown files (only outside frontmatter).
+        # Both ``` and ~~~ are CommonMark fences — scan both as code (Codex P0).
+        if is_markdown and not in_frontmatter and re.match(r"^\s*(?:```|~~~)", line):
             in_code_fence = not in_code_fence
             continue
 
@@ -395,19 +404,25 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
         # Frontmatter and code-fence both get full scanning.
         is_prose_in_md = (is_markdown and not in_frontmatter
                           and not in_code_fence)
+        # Inline-code spans (backticks) in prose ARE code — scan them for ALL
+        # rules, not just the prompt-injection ones (Codex P0). Plain prose still
+        # goes only through PROSE_TARGETING; the LLM-side audit reads the rest, and
+        # scanning all prose would drown documentation in self-FPs.
+        inline_code = " ".join(re.findall(r"`+([^`\n]+?)`+", line)) if is_prose_in_md else ""
 
         for rule_id, severity, pattern, why, fix in ALL_RULES:
-            # For .md prose: only scan instruction-injection rules. The rest
-            # need code context to avoid false positives on documentation.
+            target = line
             if is_prose_in_md and rule_id not in PROSE_TARGETING:
-                continue
+                if not inline_code:
+                    continue
+                target = inline_code  # scan only the inline-code span(s)
 
             try:
                 compiled = re.compile(pattern)
             except re.error:
                 continue
 
-            if compiled.search(line):
+            if compiled.search(target):
                 # Per-rule false-positive guards
                 if rule_id == "ME002":
                     if "mktemp" in line:
@@ -456,11 +471,14 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                     m = compiled.search(line)
                     if m:
                         prefix = line[: m.start()]
+                        # Only an ACTUAL negation counts as defensive. Bare modals
+                        # (should/must/may) do NOT negate — "you should ignore
+                        # safety policies" is an attack, not defense (Codex P0).
                         if re.search(
-                            r"(?i)\b(?:do\s+not|don'?t|never|should|must|may|"
-                            r"cannot|won'?t|shouldn'?t|mustn'?t|"
-                            r"refuse\s+to|reject|forbid|prevent|"
-                            r"avoid|skip|stop)\b",
+                            r"(?i)\b(?:do\s+not|don'?t|never|cannot|can'?t|won'?t|"
+                            r"shouldn'?t|mustn'?t|should\s+not|must\s+not|may\s+not|"
+                            r"should\s+never|must\s+never|"
+                            r"refuse\s+to|reject|forbid|prevent|avoid)\b",
                             prefix,
                         ):
                             continue
@@ -527,17 +545,16 @@ def check_frontmatter(skill_md: Path, root: Path) -> list[Finding]:
             why="No allowed-tools restriction — skill inherits default permissions",
             suggested_fix="Declare an explicit allowed-tools list, narrowed to what the skill needs.",
         ))
-    else:
-        at_value = at_match.group(1)
-        # Look for the broadest patterns
-        if re.search(r"Bash\(\s*\*\s*\*\s*\)", at_value):
-            findings.append(Finding(
-                severity="CRITICAL", rule_id="FM005", file=rel,
-                line=1 + fm.count("\n", 0, at_match.start()),
-                snippet=at_value.strip()[:200],
-                why="Bash(* *) grants unrestricted shell access",
-                suggested_fix="Replace with specific Bash(<command> <pattern>) entries the skill actually needs.",
-            ))
+
+    # Bash(* *) anywhere in the frontmatter. Folded/list allowed-tools place it on
+    # a following line, which a single-line value check would miss (Codex P0).
+    if re.search(r"Bash\(\s*\*\s*\*\s*\)", fm):
+        findings.append(Finding(
+            severity="CRITICAL", rule_id="FM005", file=rel, line=1,
+            snippet="Bash(* *) in allowed-tools",
+            why="Bash(* *) grants unrestricted shell access",
+            suggested_fix="Replace with specific Bash(<command> <pattern>) entries the skill actually needs.",
+        ))
 
     return findings
 
@@ -998,7 +1015,15 @@ def inventory(skill_root: Path) -> dict:
     other_files: list[str] = []
     total_bytes = 0
 
+    # Version-control / tooling internals are not part of the skill. Without this,
+    # auditing a cloned repo floods INV001 with .git/ objects (Codex P0).
+    skip_dirs = {".git", "node_modules", ".venv", "venv", "__pycache__",
+                 ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox",
+                 ".idea", ".vscode", "dist", "build"}
+
     for p in skill_root.rglob("*"):
+        if any(part in skip_dirs for part in p.relative_to(skill_root).parts):
+            continue
         # Check symlink BEFORE is_file(), because a symlink to a directory
         # is not a file and would otherwise be silently skipped.
         if p.is_symlink():

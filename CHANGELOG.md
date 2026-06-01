@@ -21,6 +21,16 @@ signatures predate a wave of newer techniques. This closes the v2 roadmap.
 - `examples/evil-exfil/` — every new pattern; pre-1.4.0 it scored GREEN.
 - `examples/clean-exfil/` — loopback/private-IP URLs, a named HTTPS host, a git SHA; stays GREEN.
 - CI: `evil-exfil` must exit 3 with `CR034`+`CR035`; `clean-exfil` must exit 0.
+- `examples/evil-bypass/` — a consolidated regression set for the review findings below.
+
+### Fixed (pre-release code-review hardening)
+- **Frontmatter bypass:** folded/list `allowed-tools` carrying `Bash(* *)` is now caught — `FM005` scans the whole frontmatter, not just the inline value.
+- **Negation-guard false-negative:** bare modals (`should`/`must`/`may`) no longer suppress `CR028`–`CR031`, so "you should ignore safety policies" is caught.
+- **Markdown coverage:** `~~~` fences and inline-code spans are now scanned as code (previously only triple-backtick fences were).
+- **Clone false-positive:** `inventory` skips `.git/`, `node_modules/`, and other VCS/tooling dirs, so auditing a cloned repo no longer floods `INV001`.
+- **Pipe-to-shell:** `CR036`/`CR037` implement the documented `bash <(curl …)` and `eval "$(curl …)"` patterns.
+- **Honest "read-only" claim:** `SKILL.md` now notes the `echo`-redirection caveat and that `$SKILL_PATH` scoping is instruction-level.
+- CI: per-phase assertions broadened (`AST006`/`AST008`, `UNI002`/`UNI004`, `HI019`–`HI021`/`ME011`) plus the `evil-bypass` regression step.
 
 ### Closed
 - The **v2 roadmap** is complete: bundled-config (1.1.0) → AST pass (1.2.0) → Unicode pass (1.3.0) → exfil/evasion (1.4.0).

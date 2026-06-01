@@ -28,7 +28,7 @@ audited, your filesystem, or anything else.
 
 ## What it catches
 
-A non-exhaustive sample of the **31 CRITICAL**, **16 HIGH**, **9 MEDIUM** static rules:
+A non-exhaustive sample of the static rules — **35 CRITICAL**, **18 HIGH**, **10 MEDIUM** regex rules, plus structural config rules (`CR032`–`CR033`, `HI017`–`HI018`, `ME010`, `INV002`), the Python AST pass (`AST001`–`AST008`), and the Unicode pass (`UNI001`–`UNI004`):
 
 **CRITICAL — refuse, no patch:**
 - Pipe-to-shell (`curl ... | sh`), base64-decoded `eval`/`exec`, dynamic `__import__` with concatenation
@@ -203,9 +203,13 @@ skill-checker/
 ├── references/
 │   ├── red-flags.md      ← catalogue of patterns by severity
 │   └── patch-templates.md ← ready-to-paste fixes for YELLOW findings
-├── examples/
-│   ├── clean-skill/      ← minimal benign skill, should exit 0 (GREEN)
-│   └── evil-skill/       ← skill exhibiting common attacks, should exit 3 (RED)
+├── examples/             ← paired clean/evil fixtures, each asserted in CI:
+│   ├── clean-skill/ + evil-skill/        ← baseline benign / common attacks
+│   ├── evil-plugin/ + clean-with-data/   ← bundled hooks+MCP / benign config-key data
+│   ├── evil-ast/ + clean-ast/            ← obfuscated calls / safe Python
+│   ├── evil-unicode/ + clean-unicode/    ← hidden-Unicode injection / bilingual prose
+│   ├── evil-exfil/ + clean-exfil/        ← modern exfil / local-dev URLs
+│   └── evil-bypass/                      ← regression set for previously-evaded patterns
 └── docs/
     └── HOWTO.md          ← user-facing guide
 ```
