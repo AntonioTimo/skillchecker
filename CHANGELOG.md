@@ -4,6 +4,29 @@ All notable changes to skill-checker.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.3.0] — 2026-06-01
+
+New capability: a **Unicode / invisible-character pass**. The regex and AST
+passes see text only after it is read; they miss characters that are invisible or
+that lie about how text renders. `unicode_scan` inspects raw codepoints across all
+text files, including `.md` prose (a SKILL.md is read by the model as instructions).
+
+### Added
+- `scripts/scan.py`: `unicode_scan` —
+  - `UNI001` — bidirectional control: RLO/LRO override → CRITICAL; embedding/isolate → HIGH (Trojan Source, CVE-2021-42574)
+  - `UNI002` — zero-width / invisible (ZWSP, word joiner, soft hyphen, mid-file BOM) → HIGH
+  - `UNI003` — Unicode Tags block (`U+E0000`–`U+E007F`) → CRITICAL (invisible instruction smuggling)
+  - `UNI004` — homoglyph: a Latin-confusable Cyrillic/Greek letter inside a Latin word → MEDIUM
+- `SKILL.md`: new **Step 6.7 — Unicode / invisible-character audit**.
+- `THREAT_MODEL.md`, `references/red-flags.md`: Unicode rows / section.
+- `examples/evil-unicode/` — bidi override + zero-width + Tags block + homoglyph; pre-1.3.0 it scored GREEN.
+- `examples/clean-unicode/` — Russian prose, hyphenated RU/EN compounds, glued jargon, and emoji; stays GREEN.
+- CI: `evil-unicode` must exit 3 with `UNI001`+`UNI003`; `clean-unicode` must exit 0.
+
+### Notes
+- `UNI004` fires only on a confusable embedded *inside* a Latin word (a neighbour test), so bilingual skills (hyphenated compounds, glued jargon) do not false-positive. Emoji ZWJ / variation selectors are excluded from `UNI002`.
+- The pass scans `.md` prose (unlike most rules) because that prose is the attack surface; documentation that *demonstrates* these characters (this repo's spec) self-flags — a documented self-audit caveat.
+
 ## [1.2.0] — 2026-06-01
 
 New capability: a **Python AST pass**. The line-based regex misses dangerous

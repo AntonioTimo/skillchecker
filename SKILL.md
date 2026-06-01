@@ -356,6 +356,33 @@ The static scanner uses a position-based check (negation must precede the danger
 
 ---
 
+## Step 6.7 — Unicode / invisible-character audit
+
+`SKILL.md` prose is read by the model **as instructions**, so deceptive Unicode
+in it is a direct injection vector that the line and AST passes (which see text
+only after it is read) cannot catch. `scan.py`'s `unicode_scan` inspects raw
+codepoints across every text file — including `.md` prose — and reports:
+
+| Rule | Finding | Severity |
+|---|---|---|
+| `UNI001` | bidirectional control — RLO/LRO **override** (`U+202D`/`U+202E`) → CRITICAL; embedding/isolate → HIGH |
+| `UNI002` | zero-width / invisible char (ZWSP, word joiner, soft hyphen, mid-file BOM) | HIGH |
+| `UNI003` | Unicode **Tags block** (`U+E0000`–`U+E007F`) — invisible instruction smuggling | CRITICAL |
+| `UNI004` | homoglyph — a Latin-confusable Cyrillic/Greek letter inside a Latin word | MEDIUM |
+
+**Judgment:** a bidi override (`UNI001` CRITICAL) or a Tags-block character
+(`UNI003`) has no legitimate use in a skill → RED. Zero-width characters
+(`UNI002`) splitting a keyword to dodge the regex → treat as RED in combination
+with anything else. A homoglyph (`UNI004`) is a MEDIUM signal — confirm the word
+is intentional.
+
+**False positives to expect:** a genuinely RTL-language skill (Arabic/Hebrew) may
+contain bidi embeddings/isolates (the HIGH variant, not the CRITICAL override); a
+bilingual skill's hyphenated compounds and glued jargon do **not** trip `UNI004`,
+which fires only on a confusable embedded *inside* a Latin word.
+
+---
+
 ## Step 7 — Description-vs-behavior consistency
 
 Compare the skill's `description` and `when_to_use` fields against what the code actually does.
