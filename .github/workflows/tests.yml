@@ -139,7 +139,7 @@ jobs:
           import json, sys
           data = json.load(open("/tmp/out.json"))
           rules = {f["rule_id"] for f in data["findings"]}
-          required = {"AST001": "dynamic eval/exec", "AST002": "aliased builtin", "AST003": "subprocess shell=True"}
+          required = {"AST001": "dynamic eval/exec", "AST002": "aliased builtin", "AST003": "subprocess shell=True", "AST006": "dynamic getattr", "AST008": "char-built exec"}
           missing = [(k, v) for k, v in required.items() if k not in rules]
           if missing:
               print("::error::evil-ast missing expected catches:")
@@ -177,7 +177,7 @@ jobs:
           import json, sys
           data = json.load(open("/tmp/out.json"))
           rules = {f["rule_id"] for f in data["findings"]}
-          required = {"UNI001": "bidi override", "UNI003": "Unicode Tags block"}
+          required = {"UNI001": "bidi override", "UNI002": "zero-width", "UNI003": "Unicode Tags block", "UNI004": "homoglyph"}
           missing = [(k, v) for k, v in required.items() if k not in rules]
           if missing:
               print("::error::evil-unicode missing expected catches:")
@@ -199,6 +199,69 @@ jobs:
             exit 1
           fi
           echo "::notice::clean-unicode: exit 0 (GREEN) ✓"
+
+      - name: evil-exfil must exit 3 (RED) with CR034 + CR035
+        run: |
+          set +e
+          python3 scripts/scan.py examples/evil-exfil/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 3 ]; then
+            echo "::error::evil-exfil should exit 3 (RED), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          python3 <<'PY'
+          import json, sys
+          data = json.load(open("/tmp/out.json"))
+          rules = {f["rule_id"] for f in data["findings"]}
+          required = {"CR034": "tunneling/OOB host", "CR035": "env dump to network", "HI019": "IP-literal URL", "HI020": "IFS evasion", "HI021": "telegram API", "ME011": "base64 blob"}
+          missing = [(k, v) for k, v in required.items() if k not in rules]
+          if missing:
+              print("::error::evil-exfil missing expected catches:")
+              for rule, why in missing:
+                  print(f"  - {rule} ({why})")
+              sys.exit(1)
+          print("evil-exfil: exit 3 (RED), CR034+CR035 present OK")
+          PY
+
+      - name: clean-exfil must exit 0 (GREEN)
+        run: |
+          set +e
+          python3 scripts/scan.py examples/clean-exfil/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::clean-exfil should exit 0 (GREEN), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          echo "::notice::clean-exfil: exit 0 (GREEN) ✓"
+
+      - name: evil-bypass must exit 3 (RED) — code-review regression set
+        run: |
+          set +e
+          python3 scripts/scan.py examples/evil-bypass/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 3 ]; then
+            echo "::error::evil-bypass should exit 3 (RED), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          python3 <<'PY'
+          import json, sys
+          data = json.load(open("/tmp/out.json"))
+          rules = {f["rule_id"] for f in data["findings"]}
+          required = {"FM005": "yaml-list Bash(* *)", "CR026": "~~~/inline exfil", "CR029": "bare-modal policy override", "CR036": "process-substitution pipe-to-shell", "CR037": "eval-substitution pipe-to-shell"}
+          missing = [(k, v) for k, v in required.items() if k not in rules]
+          if missing:
+              print("::error::evil-bypass missing expected catches:")
+              for rule, why in missing:
+                  print(f"  - {rule} ({why})")
+              sys.exit(1)
+          print(f"evil-bypass: exit 3 (RED), all {len(required)} bypass-class catches present OK")
+          PY
 
       - name: Self-audit smoke test (no crash)
         run: |

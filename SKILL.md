@@ -28,7 +28,7 @@ A paranoid auditor for Claude Code skills. Before you install a skill, run this.
 
 ## Read-only by design
 
-This skill **only reads**. It cannot delete, write, or modify anything in the skill being audited. The `allowed-tools` whitelist contains zero write/delete operations. If you ever see this skill request `rm`, `mkdir`, `cp`, `mv`, or any network operation — that's a tampered version, not the real one.
+This skill is built to **only read**. Its `allowed-tools` whitelist contains no `rm`, `cp`, `mv`, `tee`, `mkdir`, package-install, or network commands, and no interpreter wildcard — only `test`, `echo` (diagnostic messages to stdout), and the single pinned `scan.py`. `echo` could in principle redirect into a file; the skill never does, and you can verify it — every bash block here only echoes to stdout. `Read`/`Glob`/`Grep` are not themselves path-restricted, so scoping to `$SKILL_PATH` is enforced at the **instruction** level by the Checker Scope Rules below. If you ever see this skill request `rm`, `cp`, `mv`, a redirect into a file, or a network call — that's a tampered version, not the real one.
 
 ## Checker Scope Rules — Read before audit
 

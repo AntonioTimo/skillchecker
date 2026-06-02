@@ -180,6 +180,22 @@ CRITICAL_RULES = [
               r"(?:document|file|input|book|content|attachment)",
      "Role confusion — skill asks the model to treat untrusted input as instructions",
      "Refuse. This is the prompt-injection vulnerability the skill should be defending against, not enabling."),
+
+    ("CR034", r"(?:trycloudflare\.com|\.loca\.lt|serveo\.net|lhr\.life|localhost\.run|\.oast\.(?:fun|live|site|pro|me)|pipedream\.net|beeceptor\.com|requestcatcher\.com|\.telebit\.(?:io|me)|tunnelto\.dev)",
+     "Tunneling / OOB-interaction service — points at an attacker-controlled box; data exfiltration channel",
+     "Refuse unless the skill is explicitly and transparently a tunnel helper."),
+
+    ("CR035", r"\b(?:env|printenv)\b[^\n|]*\|[^\n]*\b(?:curl|wget|nc|ncat|netcat|telnet)\b",
+     "Environment dump piped to a network tool — wholesale exfiltration of secrets held in env vars",
+     "Refuse."),
+
+    ("CR036", r"(?:bash|sh|zsh|source|\.)\s+<\(\s*(?:curl|wget|fetch)\b",
+     "Process-substitution pipe-to-shell — runs unaudited remote code",
+     "Refuse. Patching is not enough; the skill is fetching and executing remote code."),
+
+    ("CR037", r"\beval\b[^\n]*\$\(\s*(?:curl|wget|fetch)\b",
+     "eval over a command-substituted remote fetch — runs unaudited remote code",
+     "Refuse."),
 ]
 
 HIGH_RULES = [
@@ -242,6 +258,18 @@ HIGH_RULES = [
     ("HI016", r"\bFunction\s*\(|\bBuffer\.from\s*\([^)]*[\"']base64[\"']\s*\)|\bvm\.runIn",
      "JavaScript dynamic code execution / base64 decode — common obfuscation pattern",
      "Refuse if used over non-literal input."),
+
+    ("HI019", r"https?://(?:\d{1,3}(?:\.\d{1,3}){3}|0x[0-9a-fA-F]{6,8}\b|\d{8,10}\b|\[[0-9A-Fa-f:]+\])",
+     "IP-literal or numeric-encoded IP in a URL — bypasses domain blocklists; a hardcoded public/encoded host is a common C2 / exfil pattern",
+     "Verify the destination. A public IP literal or an encoded IP (hex/decimal) is suspicious; prefer a named, documented endpoint."),
+
+    ("HI020", r"\$\{IFS\}|\$IFS\b",
+     "${IFS} shell space-substitution — evasion used to slip spaces past naive command filters",
+     "There is no legitimate reason to assemble commands with ${IFS} in a skill."),
+
+    ("HI021", r"api\.telegram\.org/bot",
+     "Telegram bot API — usable as a covert exfiltration channel; legitimate only for a skill whose declared purpose is a Telegram bot",
+     "Confirm the skill's stated purpose; otherwise treat as an exfil channel and refuse."),
 ]
 
 MEDIUM_RULES = [
@@ -280,6 +308,10 @@ MEDIUM_RULES = [
     ("ME009", r"(?i)(?:trust\s+me|this\s+is\s+safe|no\s+need\s+to\s+(?:inspect|review|check)|these\s+permissions\s+are\s+required|don'?t\s+worry\s+about)",
      "'Trust me' language — manipulation; safety should be argued from concrete constraints",
      "Replace with specific justifications for each permission requested."),
+
+    ("ME011", r"[A-Za-z0-9+/]{256,}={0,2}",
+     "Very long base64-like literal (>=256 chars) — possible embedded payload or obfuscated data",
+     "Decode and inspect; confirm it is benign data, not code or a hidden command."),
 ]
 
 LOW_RULES = [
@@ -362,8 +394,9 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                 in_frontmatter = False
                 continue
 
-        # Toggle code-fence state for markdown files (only outside frontmatter)
-        if is_markdown and not in_frontmatter and re.match(r"^\s*```", line):
+        # Toggle code-fence state for markdown files (only outside frontmatter).
+        # Both ``` and ~~~ are CommonMark fences — scan both as code (Codex P0).
+        if is_markdown and not in_frontmatter and re.match(r"^\s*(?:```|~~~)", line):
             in_code_fence = not in_code_fence
             continue
 
@@ -371,19 +404,25 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
         # Frontmatter and code-fence both get full scanning.
         is_prose_in_md = (is_markdown and not in_frontmatter
                           and not in_code_fence)
+        # Inline-code spans (backticks) in prose ARE code — scan them for ALL
+        # rules, not just the prompt-injection ones (Codex P0). Plain prose still
+        # goes only through PROSE_TARGETING; the LLM-side audit reads the rest, and
+        # scanning all prose would drown documentation in self-FPs.
+        inline_code = " ".join(re.findall(r"`+([^`\n]+?)`+", line)) if is_prose_in_md else ""
 
         for rule_id, severity, pattern, why, fix in ALL_RULES:
-            # For .md prose: only scan instruction-injection rules. The rest
-            # need code context to avoid false positives on documentation.
+            target = line
             if is_prose_in_md and rule_id not in PROSE_TARGETING:
-                continue
+                if not inline_code:
+                    continue
+                target = inline_code  # scan only the inline-code span(s)
 
             try:
                 compiled = re.compile(pattern)
             except re.error:
                 continue
 
-            if compiled.search(line):
+            if compiled.search(target):
                 # Per-rule false-positive guards
                 if rule_id == "ME002":
                     if "mktemp" in line:
@@ -402,6 +441,18 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                     # ME006's single-line length check doesn't apply.
                     if re.search(r"^description:\s*[>|][-+]?\s*$", line):
                         continue
+                if rule_id == "HI019":
+                    # Skip loopback / private / link-local dotted-quad IPs (local
+                    # dev URLs like http://127.0.0.1:8080). Encoded forms
+                    # (0x.../decimal/IPv6) are never skipped.
+                    m = re.search(r"https?://(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}", line)
+                    if m:
+                        a, b = int(m.group(1)), int(m.group(2))
+                        if (a in (0, 10, 127, 255)
+                                or (a == 192 and b == 168)
+                                or (a == 172 and 16 <= b <= 31)
+                                or (a == 169 and b == 254)):
+                            continue
                 if rule_id in ("CR020", "CR021"):
                     # Skip if match is inside a string literal that's an
                     # error/help message telling the user to install something
@@ -420,11 +471,14 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                     m = compiled.search(line)
                     if m:
                         prefix = line[: m.start()]
+                        # Only an ACTUAL negation counts as defensive. Bare modals
+                        # (should/must/may) do NOT negate — "you should ignore
+                        # safety policies" is an attack, not defense (Codex P0).
                         if re.search(
-                            r"(?i)\b(?:do\s+not|don'?t|never|should|must|may|"
-                            r"cannot|won'?t|shouldn'?t|mustn'?t|"
-                            r"refuse\s+to|reject|forbid|prevent|"
-                            r"avoid|skip|stop)\b",
+                            r"(?i)\b(?:do\s+not|don'?t|never|cannot|can'?t|won'?t|"
+                            r"shouldn'?t|mustn'?t|should\s+not|must\s+not|may\s+not|"
+                            r"should\s+never|must\s+never|"
+                            r"refuse\s+to|reject|forbid|prevent|avoid)\b",
                             prefix,
                         ):
                             continue
@@ -491,17 +545,16 @@ def check_frontmatter(skill_md: Path, root: Path) -> list[Finding]:
             why="No allowed-tools restriction — skill inherits default permissions",
             suggested_fix="Declare an explicit allowed-tools list, narrowed to what the skill needs.",
         ))
-    else:
-        at_value = at_match.group(1)
-        # Look for the broadest patterns
-        if re.search(r"Bash\(\s*\*\s*\*\s*\)", at_value):
-            findings.append(Finding(
-                severity="CRITICAL", rule_id="FM005", file=rel,
-                line=1 + fm.count("\n", 0, at_match.start()),
-                snippet=at_value.strip()[:200],
-                why="Bash(* *) grants unrestricted shell access",
-                suggested_fix="Replace with specific Bash(<command> <pattern>) entries the skill actually needs.",
-            ))
+
+    # Bash(* *) anywhere in the frontmatter. Folded/list allowed-tools place it on
+    # a following line, which a single-line value check would miss (Codex P0).
+    if re.search(r"Bash\(\s*\*\s*\*\s*\)", fm):
+        findings.append(Finding(
+            severity="CRITICAL", rule_id="FM005", file=rel, line=1,
+            snippet="Bash(* *) in allowed-tools",
+            why="Bash(* *) grants unrestricted shell access",
+            suggested_fix="Replace with specific Bash(<command> <pattern>) entries the skill actually needs.",
+        ))
 
     return findings
 
@@ -956,13 +1009,39 @@ def unicode_scan(path: Path, rel: str) -> list[Finding]:
     return findings
 
 
+def _looks_like_text(path: Path) -> bool:
+    """Sniff a file's first chunk: text if it has no NUL byte and decodes as
+    UTF-8 (a multibyte char cut at the chunk boundary is tolerated). Lets
+    extensionless text files (LICENSE, .gitignore, Makefile) be scanned instead
+    of flagged as unauditable blobs (Codex)."""
+    try:
+        chunk = path.read_bytes()[:8192]
+    except OSError:
+        return False
+    if b"\x00" in chunk:
+        return False
+    try:
+        chunk.decode("utf-8")
+        return True
+    except UnicodeDecodeError as e:
+        return e.start >= len(chunk) - 4  # only trailing boundary-cut bytes failed
+
+
 def inventory(skill_root: Path) -> dict:
     """Walk the skill dir and classify every file."""
     text_files: list[str] = []
     other_files: list[str] = []
     total_bytes = 0
 
+    # Version-control / tooling internals are not part of the skill. Without this,
+    # auditing a cloned repo floods INV001 with .git/ objects (Codex P0).
+    skip_dirs = {".git", "node_modules", ".venv", "venv", "__pycache__",
+                 ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox",
+                 ".idea", ".vscode", "dist", "build"}
+
     for p in skill_root.rglob("*"):
+        if any(part in skip_dirs for part in p.relative_to(skill_root).parts):
+            continue
         # Check symlink BEFORE is_file(), because a symlink to a directory
         # is not a file and would otherwise be silently skipped.
         if p.is_symlink():
@@ -976,7 +1055,7 @@ def inventory(skill_root: Path) -> dict:
         except OSError:
             pass
 
-        if p.suffix.lower() in TEXT_EXTENSIONS:
+        if p.suffix.lower() in TEXT_EXTENSIONS or _looks_like_text(p):
             text_files.append(p.relative_to(skill_root).as_posix())
         else:
             other_files.append(p.relative_to(skill_root).as_posix())

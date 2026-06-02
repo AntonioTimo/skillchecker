@@ -20,15 +20,18 @@ Output is one of three verdicts:
   You apply manually, re-run, iterate to GREEN.
 - 🟢 **GREEN** — safe to install. Install command + brief usage included.
 
-Read-only by design: the `allowed-tools` list contains zero
-write/delete/network operations. The auditor cannot modify the skill being
-audited, your filesystem, or anything else.
+Read-only by design: the `allowed-tools` list contains no `rm`, `cp`, `mv`,
+`tee`, `mkdir`, package-install, or network commands, and no interpreter
+wildcard — only `test`, `echo` (diagnostics), and the pinned `scan.py`. `echo`
+could in principle redirect to a file; the skill never does, and you can audit
+that. Path scoping is enforced at the instruction level (the Checker Scope
+Rules), since `Read`/`Glob`/`Grep` are not themselves path-restricted.
 
 ---
 
 ## What it catches
 
-A non-exhaustive sample of the **31 CRITICAL**, **16 HIGH**, **9 MEDIUM** static rules:
+A non-exhaustive sample of the static rules — **35 CRITICAL**, **18 HIGH**, **10 MEDIUM** regex rules, plus structural config rules (`CR032`–`CR033`, `HI017`–`HI018`, `ME010`, `INV002`), the Python AST pass (`AST001`–`AST008`), and the Unicode pass (`UNI001`–`UNI004`):
 
 **CRITICAL — refuse, no patch:**
 - Pipe-to-shell (`curl ... | sh`), base64-decoded `eval`/`exec`, dynamic `__import__` with concatenation
@@ -203,9 +206,13 @@ skill-checker/
 ├── references/
 │   ├── red-flags.md      ← catalogue of patterns by severity
 │   └── patch-templates.md ← ready-to-paste fixes for YELLOW findings
-├── examples/
-│   ├── clean-skill/      ← minimal benign skill, should exit 0 (GREEN)
-│   └── evil-skill/       ← skill exhibiting common attacks, should exit 3 (RED)
+├── examples/             ← paired clean/evil fixtures, each asserted in CI:
+│   ├── clean-skill/ + evil-skill/        ← baseline benign / common attacks
+│   ├── evil-plugin/ + clean-with-data/   ← bundled hooks+MCP / benign config-key data
+│   ├── evil-ast/ + clean-ast/            ← obfuscated calls / safe Python
+│   ├── evil-unicode/ + clean-unicode/    ← hidden-Unicode injection / bilingual prose
+│   ├── evil-exfil/ + clean-exfil/        ← modern exfil / local-dev URLs
+│   └── evil-bypass/                      ← regression set for previously-evaded patterns
 └── docs/
     └── HOWTO.md          ← user-facing guide
 ```
