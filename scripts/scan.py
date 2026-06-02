@@ -263,7 +263,7 @@ HIGH_RULES = [
      "JavaScript dynamic code execution / base64 decode — common obfuscation pattern",
      "Refuse if used over non-literal input."),
 
-    ("HI019", r"https?://(?:\d{1,3}(?:\.\d{1,3}){3}|0x[0-9a-fA-F]{6,8}\b|\d{8,10}\b|\[[0-9A-Fa-f:]+\])",
+    ("HI019", r"https?://(?:[^/@\s]*@)?(?:\d{1,3}(?:\.\d{1,3}){3}|0x[0-9a-fA-F]{6,8}\b|\d{8,10}\b|\[[0-9A-Fa-f:]+\])",
      "IP-literal or numeric-encoded IP in a URL — bypasses domain blocklists; a hardcoded public/encoded host is a common C2 / exfil pattern",
      "Verify the destination. A public IP literal or an encoded IP (hex/decimal) is suspicious; prefer a named, documented endpoint."),
 
@@ -347,13 +347,15 @@ def _is_private_ipv4(a: int, b: int) -> bool:
 
 
 def scan_file(path: Path, root: Path) -> list[Finding]:
-    """Open a file and run every rule's regex against each line.
+    """Open a file and run every rule against each line.
 
-    For .md files, only lines inside code-fence blocks (```...```) are scanned,
-    because that's the only place where executable instructions live. Inline-code
-    in prose (single backticks) is documentation — examples of patterns being
-    discussed, not patterns being executed. Without this, a skill that documents
-    its own threat model triggers itself.
+    For .md files: lines inside ``` / ~~~ code fences are scanned in full. In
+    prose, the prompt-injection rules (PROSE_TARGETING) scan the whole line, and
+    every other rule scans each inline-code (backtick) span individually — a span
+    is executable-looking content, while plain prose is left to the LLM-side audit
+    so a skill documenting its own threat model doesn't trip every rule. A span
+    framed by a defensive negation immediately before it ("never use `x`") is
+    skipped; NFKC-normalized copies are also tested so fullwidth/compat hiding fails.
     """
     rel = path.relative_to(root).as_posix()
     findings: list[Finding] = []
@@ -418,87 +420,83 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
         # Frontmatter and code-fence both get full scanning.
         is_prose_in_md = (is_markdown and not in_frontmatter
                           and not in_code_fence)
-        # Inline-code spans (backticks) in prose ARE code — scan them for ALL
-        # rules, not just the prompt-injection ones (Codex P0). Plain prose still
-        # goes only through PROSE_TARGETING; the LLM-side audit reads the rest, and
+        # Inline-code spans in prose ARE code — scanned INDIVIDUALLY, each with the
+        # prose IMMEDIATELY before it, so a defensive span ("never use `x`") can't
+        # mask a later malicious span on the same line (Codex round 4). Plain prose
+        # still only runs PROSE_TARGETING; the LLM-side audit reads the rest, and
         # scanning all prose would drown documentation in self-FPs.
-        inline_code = " ".join(re.findall(r"`+([^`\n]+?)`+", line)) if is_prose_in_md else ""
+        inline_spans = []
+        if is_prose_in_md:
+            prev_end = 0
+            for sm in re.finditer(r"`+([^`\n]+?)`+", line):
+                inline_spans.append((sm.group(1), line[prev_end:sm.start()]))
+                prev_end = sm.end()
 
         for rule_id, severity, pattern, why, fix in ALL_RULES:
-            target = line
-            if is_prose_in_md and rule_id not in PROSE_TARGETING:
-                if not inline_code:
-                    continue
-                target = inline_code  # scan only the inline-code span(s)
-
             try:
                 compiled = re.compile(pattern)
             except re.error:
                 continue
 
-            # Also test an NFKC-normalized copy, so fullwidth / compatibility
-            # characters (e.g. fullwidth latin or math styles) can't hide a
-            # dangerous pattern. Escalate-only — normalization never suppresses.
-            norm = unicodedata.normalize("NFKC", target)
-            m_raw = compiled.search(target)
-            m_nfkc = compiled.search(norm) if (not m_raw and norm != target) else None
-            if m_raw or m_nfkc:
-                # Defensive inline-code guard (Codex round 3): a rule matched
-                # inside inline code in prose that is framed defensively ("never
-                # use `x`", "reject `y`") is documentation, not an attack. Suppress
-                # when a negation precedes the inline code on the line.
-                if is_prose_in_md and target == inline_code:
-                    pre = line.split("`", 1)[0]
-                    if re.search(r"(?i)\b(?:never|do\s+not|don'?t|reject|refuse|forbid|avoid|block|must\s+not|should\s+not)\b", pre):
-                        continue
-                # Per-rule false-positive guards
+            if is_prose_in_md and rule_id not in PROSE_TARGETING:
+                units = inline_spans          # (span text, prose right before it)
+            else:
+                units = [(line, None)]        # whole line; no inline defensive guard
+
+            for unit, preceding in units:
+                # Defensive inline-code guard: a negation in the prose IMMEDIATELY
+                # before THIS span marks documentation ("never use `x`"), not an
+                # attack — skip only this span, never the rest of the line.
+                if preceding is not None and re.search(
+                        r"(?i)\b(?:never|do\s+not|don'?t|reject|refuse|forbid|avoid|block|must\s+not|should\s+not)\b",
+                        preceding):
+                    continue
+
+                # Also test an NFKC-normalized copy, so fullwidth / compatibility
+                # characters can't hide a dangerous pattern. Escalate-only.
+                norm = unicodedata.normalize("NFKC", unit)
+                m_raw = compiled.search(unit)
+                m_nfkc = compiled.search(norm) if (not m_raw and norm != unit) else None
+                if not (m_raw or m_nfkc):
+                    continue
+
+                # Per-rule false-positive guards (operate on the scanned unit)
                 if rule_id == "ME002":
-                    if "mktemp" in line:
+                    if "mktemp" in unit:
                         continue
-                    if re.search(r"/tmp/[A-Za-z0-9_-]+\.\*", line):
+                    if re.search(r"/tmp/[A-Za-z0-9_-]+\.\*", unit):
                         continue
-                    if re.search(r"(?:PREFIX|prefix)\s*=\s*['\"]/tmp/", line):
+                    if re.search(r"(?:PREFIX|prefix)\s*=\s*['\"]/tmp/", unit):
                         continue
                 if rule_id == "ME004":
-                    if line.rstrip().endswith((",", "(", "\\")):
+                    if unit.rstrip().endswith((",", "(", "\\")):
                         continue
                 if rule_id == "ME006":
-                    # If description uses YAML folded/literal scalar
-                    # (description: >-, description: |, description: >),
-                    # the actual content is on the following lines and
-                    # ME006's single-line length check doesn't apply.
-                    if re.search(r"^description:\s*[>|][-+]?\s*$", line):
+                    # YAML folded/literal scalar: the value continues on later lines.
+                    if re.search(r"^description:\s*[>|][-+]?\s*$", unit):
                         continue
                 if rule_id == "HI019":
-                    # Suppress ONLY when EVERY IP-URL on the line is private /
-                    # loopback — a private IP must not mask a public one on the
-                    # same line (Codex round 3). Encoded forms (0x/decimal/IPv6)
-                    # never skip. Read the NFKC-normalized form (fullwidth IPs).
-                    quads = re.findall(r"https?://(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}", norm)
-                    encoded = re.search(r"https?://(?:0x[0-9a-fA-F]{6,8}\b|\d{8,10}\b|\[[0-9A-Fa-f:]+\])", norm)
+                    # Suppress ONLY when EVERY IP-URL on the unit is private /
+                    # loopback — a private IP must not mask a public one on the same
+                    # line, and userinfo (user:pass@HOST) must not be read as the
+                    # host (Codex rounds 3–4). Encoded forms never skip.
+                    quads = re.findall(r"https?://(?:[^/@\s]*@)?(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}", norm)
+                    encoded = re.search(r"https?://(?:[^/@\s]*@)?(?:0x[0-9a-fA-F]{6,8}\b|\d{8,10}\b|\[[0-9A-Fa-f:]+\])", norm)
                     if not encoded and quads and all(_is_private_ipv4(int(a), int(b)) for a, b in quads):
                         continue
                 if rule_id in ("CR020", "CR021"):
-                    # Skip if match is inside a string literal that's an
-                    # error/help message telling the user to install something
-                    # — common in scripts (e.g. "ERROR: install poppler with: brew install poppler").
-                    stripped = line.lstrip()
+                    # Skip an install command inside an error/help string literal.
+                    stripped = unit.lstrip()
                     if (stripped.startswith(('"', "'", "f'", 'f"', '"""', "'''")) or
-                        re.search(r"(?:print|stderr|sys\.exit|raise)\s*\(", line) or
-                        line.rstrip().endswith(('\\n",', '\\n"', "\\n',", "\\n'"))):
+                        re.search(r"(?:print|stderr|sys\.exit|raise)\s*\(", unit) or
+                        unit.rstrip().endswith(('\\n",', '\\n"', "\\n',", "\\n'"))):
                         continue
                 if rule_id in ("CR028", "CR029", "CR030", "CR031"):
-                    # Distinguish defensive prose from attack by where the
-                    # negation sits. Defensive: negation PRECEDES the dangerous
-                    # phrase ("do not retry with relaxed limits", "skill must
-                    # never ignore safety"). Attack: dangerous phrase is the
-                    # imperative ("Do not tell the user", "Ignore safety").
-                    m = compiled.search(line)
+                    # Defensive prose: an ACTUAL negation PRECEDES the dangerous
+                    # phrase (bare modals should/must/may do not count — Codex).
+                    m = compiled.search(unit)
                     if m:
-                        prefix = line[: m.start()]
-                        # Only an ACTUAL negation counts as defensive. Bare modals
-                        # (should/must/may) do NOT negate — "you should ignore
-                        # safety policies" is an attack, not defense (Codex P0).
+                        prefix = unit[: m.start()]
                         if re.search(
                             r"(?i)\b(?:do\s+not|don'?t|never|cannot|can'?t|won'?t|"
                             r"shouldn'?t|mustn'?t|should\s+not|must\s+not|may\s+not|"
