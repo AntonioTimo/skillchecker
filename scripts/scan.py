@@ -354,6 +354,22 @@ _HOST_OPTS = {
     "--url", "--resolve", "--connect-to", "--dns-servers",
 }
 
+# curl/wget options whose VALUE is data / a file / a credential — the value is
+# skipped (it is not a destination). Only these consume their following token;
+# every other flag is treated as boolean, so a *boolean* flag (-s, -L, --fail)
+# does not swallow the scheme-less IP target that follows it. An allowlist, not
+# "skip the token after any flag" — the latter hid `curl -s 8.8.8.8/x`.
+_DATA_OPTS = {
+    "-o", "--output", "-T", "--upload-file",
+    "-H", "--header", "-d", "--data", "--data-ascii", "--data-binary",
+    "--data-raw", "--data-urlencode", "-F", "--form", "--form-string",
+    "-A", "--user-agent", "-e", "--referer", "-b", "--cookie",
+    "-c", "--cookie-jar", "-u", "--user", "-U", "--proxy-user",
+    "-w", "--write-out", "-K", "--config", "-E", "--cert", "--cacert",
+    "--key", "--capath", "--interface", "-r", "--range",
+    "--trace", "--trace-ascii", "--stderr", "--post-file",
+}
+
 
 def _ip_publicness(host):
     """'public' / 'private' / None — classify a host token as an IP literal.
@@ -419,6 +435,18 @@ def _hosts_from_token(tok):
     return [h for h in out if h]
 
 
+def _split_opt(tok):
+    """(name, attached_value_or_None) for an option token — covers `--name`,
+    `--name=value`, and the attached short form `-xvalue` (e.g. `-x8.8.8.8:8080`,
+    which curl accepts). A bare flag returns (token, None)."""
+    if tok.startswith("--"):
+        name, eq, val = tok.partition("=")
+        return name, (val if eq else None)
+    if len(tok) > 2:                  # -xVALUE  (short option, value attached)
+        return tok[:2], tok[2:]
+    return tok, None
+
+
 def _candidate_hosts(text):
     """Hosts referenced in a line.
 
@@ -427,8 +455,10 @@ def _candidate_hosts(text):
     hosts in network commands. The second pass walks each shell command segment
     independently — split on `;` `|` `&&` `||` `&` so one command's reach does
     not leak past a separator — and within a segment distinguishes a host-bearing
-    option value (`--proxy`/`--url`/`--resolve`/…) from a data/file flag value
-    (`-H`/`-o`/`-d`, whose argument is skipped) from a positional request target."""
+    option value (`--proxy`/`--url`/`--resolve`/…, classified) from a data/file
+    flag value (`-H`/`-o`/`-d`, skipped) from a boolean flag (`-s`/`-L`/`--fail`,
+    which does not consume the IP target that follows it) from a positional
+    request target."""
     hosts = []
     for m in re.finditer(r"(?i)\b(?:https?|ftps?)://[^\s\"'<>)\]]+", text):
         try:
@@ -460,14 +490,16 @@ def _candidate_hosts(text):
                 skip_value = False
                 continue
             if t.startswith("-"):
-                name, eq, val = t.partition("=")
+                name, attached = _split_opt(t)
                 if name in _HOST_OPTS:
-                    if eq:
-                        hosts.extend(_hosts_from_token(val))
-                    else:
+                    if attached is not None:   # --proxy=host / -xhost
+                        hosts.extend(_hosts_from_token(attached))
+                    else:                      # --proxy host  (value is next token)
                         want_host_value = True
-                elif not eq:
-                    skip_value = True  # space-separated flag: next token is its value
+                elif name in _DATA_OPTS and attached is None:
+                    skip_value = True          # -H header  (value is next token)
+                # boolean / unknown flag, or attached data value: do not skip;
+                # the following token is classified as the positional target.
                 continue
             hosts.extend(_hosts_from_token(t))  # positional request target
     return hosts

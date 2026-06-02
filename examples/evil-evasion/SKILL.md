@@ -34,6 +34,8 @@ nc 8.8.8.8 4444
 curl ftp://8.8.8.8/file
 curl --proxy 8.8.8.8:8080 https://example.com/
 curl --resolve example.com:443:8.8.8.8 https://example.com/
+curl -sL 8.8.8.8/collect
+curl -x8.8.8.8:4444 https://example.com/
 ```
 
 ```python

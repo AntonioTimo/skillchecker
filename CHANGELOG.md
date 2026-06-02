@@ -29,6 +29,8 @@ First v3 increment: **Evasion v2** — normalization and homoglyph-domain covera
 - **`HI019` reads host-bearing `curl` options** — `-x` / `--proxy` / `--url` / `--resolve` / `--connect-to` / `--socks5` carry the destination, so a public IP behind a proxy or a custom resolve (`--resolve example.com:443:8.8.8.8`) is classified instead of skipped like a `-H` / `-o` data value.
 - **`HI019` host walk resets on shell separators** (`;` `|` `&&` `||` `&`) — `curl https://api.example.com && echo 8.8.8.8` no longer false-flags the echoed IP as the request target.
 - **`HI019` encoded IP always flags** — a hex / decimal host (`0x7f000001`, `2130706433`) is reported even when it decodes to loopback; writing an IP in encoded form is itself the evasion signal (a plainly-written `127.0.0.1` stays fine).
+- **`HI019` flag handling is an allowlist, not skip-after-any-flag** — only known value-taking data/file options (`-H`/`-o`/`-d`/`-A`/`-u`/…) consume their argument, so a *boolean* flag no longer hides the scheme-less IP that follows it (`curl -s 8.8.8.8/x`, `wget -q 8.8.8.8/x`, `nc -v 8.8.8.8 4444`).
+- **`HI019` parses attached short-option values** — `-x8.8.8.8:8080` (curl's `-Xvalue` form) is read like `--proxy 8.8.8.8:8080` and `--proxy=8.8.8.8:8080`.
 
 ## [1.4.0] — 2026-06-01
 

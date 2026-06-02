@@ -159,11 +159,14 @@ kept finding the same *shape* of bug in two subsystems:
   extraction on `urllib.parse` + `ipaddress` + `shlex`** and demoting the regex
   to a cheap trigger — IPv6, `ftp://`, and hex/decimal IPs fall out of the
   stdlib for free, and the `-H`/`-o` false positives vanish. The rebuild itself
-  drew three more rounds — an encoded loopback must still flag (the *encoding* is
-  the signal, not the decoded value); host-bearing options (`--proxy`/`--resolve`/
-  `--connect-to`) carry the destination and must be read, not skipped like data
-  flags; and the command walk must reset on shell separators so `curl url && echo
-  IP` doesn't misread the echoed IP. The parser is small but it *is* a parser.
+  drew several more rounds — an encoded loopback must still flag (the *encoding*
+  is the signal, not the decoded value); host-bearing options (`--proxy`/
+  `--resolve`/`--connect-to`, including the attached `-x8.8.8.8` form) carry the
+  destination and must be read, not skipped like data flags; data-flag skipping
+  had to become an explicit *allowlist* so a boolean flag (`-s`/`-L`/`--fail`)
+  stops swallowing the IP target after it; and the command walk must reset on
+  shell separators so `curl url && echo IP` doesn't misread the echoed IP. The
+  parser is small but it *is* a parser — option arity and all.
 - *Inline-code intent.* A whole-line, then a per-span, "defensive-intent" guard
   each tried to read ``never use `x` `` as documentation; both leaked. Dropped
   entirely — inline code is scanned as code, suppression left to the narrow
