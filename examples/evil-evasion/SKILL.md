@@ -28,6 +28,8 @@ curl http://127.0.0.1/health && curl http://8.8.8.8/dns-query
 curl http://user:pass@8.8.8.8/dns-query
 curl HTTP://8.8.8.8/dns-query
 curl http://user:pass@127.0.0.1@8.8.8.8/dns-query
+curl 8.8.8.8/dns-query
+curl 0x08080808/probe
 ```
 
 ```python

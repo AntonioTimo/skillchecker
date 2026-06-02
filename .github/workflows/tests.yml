@@ -290,7 +290,7 @@ jobs:
           # Lock specific HI019 variants by snippet — one variant breaking silently
           # while another still fires must not keep CI green.
           hi019 = "\n".join(f["snippet"] for f in findings if f["rule_id"] == "HI019")
-          variants = {"HTTP://": "uppercase scheme", "127.0.0.1@8.8.8.8": "multiple-@ real host"}
+          variants = {"HTTP://": "uppercase scheme", "127.0.0.1@8.8.8.8": "multiple-@ real host", "0x08080808": "bare-IP curl target (scheme-less)"}
           missing += [(k, v + " [HI019 variant snippet]") for k, v in variants.items() if k not in hi019]
           if missing:
               print("::error::evil-evasion missing expected catches:")

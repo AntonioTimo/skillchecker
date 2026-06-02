@@ -16,7 +16,7 @@ First v3 increment: **Evasion v2** — normalization and homoglyph-domain covera
 - CI: `evil-evasion` must exit 3 with `CR038`+`HI022`+`CR001`+`HI007`+`HI019`; `clean-evasion` must exit 0.
 - `docs/ROADMAP.md` — consolidated v3 backlog (sourced from THREAT_MODEL out-of-scope + per-spec non-goals).
 
-### Fixed (pre-release code-review, rounds 2–5)
+### Fixed (pre-release code-review)
 - `CR038` and `HI022` are now **case-insensitive** — `METADATA.GOOGLE.INTERNAL` and an UPPERCASE `XN--` host no longer evade.
 - `HI022` matches **bare-host** and **`userinfo@`** forms, not only `scheme://…` — a punycode host after `curl ` or `user:pass@` was being missed.
 - The `HI019` private-IP guard reads the **NFKC-normalized** form, so a fullwidth loopback (`１２７．０．０．１`) is correctly skipped instead of flagged.
@@ -26,7 +26,8 @@ First v3 increment: **Evasion v2** — normalization and homoglyph-domain covera
 - `HI019` parses optional `userinfo@`, so `http://user:pass@8.8.8.8` and `http://127.0.0.1@8.8.8.8` (real host `8.8.8.8`) are flagged instead of read as the userinfo IP.
 - CI now requires `HI019` on `evil-evasion` and `CR001` on `evil-bypass`; the `scan_file` docstring now matches the actual fence / inline / prose behavior.
 - **Case-insensitivity swept across all host/domain/URL rules** — `CR026`, `CR034`, `HI019`, `HI021` joined `CR038`/`HI022`, so `HTTP://`, `WEBHOOK.SITE`, `TRYCLOUDFLARE.COM` no longer evade. (Command rules like `curl … | sh` stay case-sensitive — the shell is.)
-- **`HI019` userinfo parsing hardened** — greedy to the *last* `@`, so `http://user:pass@127.0.0.1@8.8.8.8` resolves the real host (`8.8.8.8`) instead of the userinfo IP.
+- **`HI019` userinfo parsing hardened** — greedy to the *last* `@`, so `http://user:pass@127.0.0.1@8.8.8.8` resolves the real host (`8.8.8.8`) instead of the userinfo IP. Conversely, an IP *in* the userinfo with a named real host (`http://8.8.8.8@example.com`) is no longer flagged.
+- **`HI019` also catches scheme-less `curl`/`wget`/`fetch` IP targets** — `curl 8.8.8.8/x`, `curl 0x08080808/x`, `curl 134744072/x` (curl accepts a host with no scheme). Scoped to network-command context, so bare numbers in prose or URL paths don't false-positive; loopback/private targets are still skipped.
 
 ## [1.4.0] — 2026-06-01
 
