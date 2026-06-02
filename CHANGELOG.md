@@ -16,11 +16,13 @@ First v3 increment: **Evasion v2** — normalization and homoglyph-domain covera
 - CI: `evil-evasion` must exit 3 with `CR038`+`HI022`; `clean-evasion` must exit 0.
 - `docs/ROADMAP.md` — consolidated v3 backlog (sourced from THREAT_MODEL out-of-scope + per-spec non-goals).
 
-### Fixed (pre-release code-review, round 2)
+### Fixed (pre-release code-review, rounds 2–3)
 - `CR038` and `HI022` are now **case-insensitive** — `METADATA.GOOGLE.INTERNAL` and an UPPERCASE `XN--` host no longer evade.
 - `HI022` matches **bare-host** and **`userinfo@`** forms, not only `scheme://…` — a punycode host after `curl ` or `user:pass@` was being missed.
 - The `HI019` private-IP guard reads the **NFKC-normalized** form, so a fullwidth loopback (`１２７．０．０．１`) is correctly skipped instead of flagged.
 - `SKILL.md` Step 6.7 now documents the NFKC re-scan + `CR038`/`HI022`; CI also asserts the math-styled-`exec` catch (`HI007`).
+- `HI019` suppresses a finding only when **every** IP-URL on the line is private/loopback — a private IP can no longer mask a public one on the same line (`curl http://127.0.0.1 && curl http://8.8.8.8`).
+- Inline-code matches framed defensively ("never use `evil.com`", "reject `xn--…`") are suppressed — the host/exfil rules gained the negation guard the prompt-injection rules already had, removing a false-positive class for security/review skills.
 
 ## [1.4.0] — 2026-06-01
 

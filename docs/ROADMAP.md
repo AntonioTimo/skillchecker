@@ -13,11 +13,12 @@ out of scope" item or a spec "Non-goals" line.
 | A | Python AST pass | 1.2.0 |
 | B | Unicode / invisible characters | 1.3.0 |
 | D | Exfil / evasion breadth + code-review hardening | 1.4.0 |
+| E | Evasion v2: NFKC normalization + homoglyph domains | 1.5.0 |
 
 ## v3 candidates
 
 ### Deepen existing passes
-- **E — Evasion v2 (in progress):** NFKC normalization pre-scan (fullwidth /
+- **E — Evasion v2 (✅ shipped in v1.5.0):** NFKC normalization pre-scan (fullwidth /
   compatibility-character evasion), IDN / punycode + homoglyph domains, and the
   cloud-metadata SSRF endpoint (`169.254.169.254`) that the `HI019` link-local
   guard currently skips. *Source: spec B's "full TR39 / NFKC / IDN homoglyphs"

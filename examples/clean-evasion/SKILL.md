@@ -26,6 +26,9 @@ curl http://１２７．０．０．１:8080/health
 
 Inline values: `api.example.com` (a named host), the price `¾ unit`, the `№ 5`.
 
+Defensive mention (a negation precedes the inline code, so it must NOT flag):
+never query `metadata.google.internal`, and reject any `xn--80ak6aa92e.com` host.
+
 ## Why this passes audit (negative test for Evasion v2)
 
 NFKC-normalizing these reveals **no** dangerous command — `½` → `1⁄2`, `™` → `TM`,

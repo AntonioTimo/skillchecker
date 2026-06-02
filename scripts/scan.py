@@ -340,6 +340,12 @@ ALL_RULES = (
 )
 
 
+def _is_private_ipv4(a: int, b: int) -> bool:
+    """Loopback / RFC1918 / link-local / reserved by the first two octets."""
+    return (a in (0, 10, 127, 255) or (a == 192 and b == 168)
+            or (a == 172 and 16 <= b <= 31) or (a == 169 and b == 254))
+
+
 def scan_file(path: Path, root: Path) -> list[Finding]:
     """Open a file and run every rule's regex against each line.
 
@@ -437,6 +443,14 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
             m_raw = compiled.search(target)
             m_nfkc = compiled.search(norm) if (not m_raw and norm != target) else None
             if m_raw or m_nfkc:
+                # Defensive inline-code guard (Codex round 3): a rule matched
+                # inside inline code in prose that is framed defensively ("never
+                # use `x`", "reject `y`") is documentation, not an attack. Suppress
+                # when a negation precedes the inline code on the line.
+                if is_prose_in_md and target == inline_code:
+                    pre = line.split("`", 1)[0]
+                    if re.search(r"(?i)\b(?:never|do\s+not|don'?t|reject|refuse|forbid|avoid|block|must\s+not|should\s+not)\b", pre):
+                        continue
                 # Per-rule false-positive guards
                 if rule_id == "ME002":
                     if "mktemp" in line:
@@ -456,17 +470,14 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                     if re.search(r"^description:\s*[>|][-+]?\s*$", line):
                         continue
                 if rule_id == "HI019":
-                    # Skip loopback / private / link-local dotted-quad IPs (local
-                    # dev URLs like http://127.0.0.1:8080). Encoded forms
-                    # (0x.../decimal/IPv6) are never skipped.
-                    m = re.search(r"https?://(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}", norm)
-                    if m:
-                        a, b = int(m.group(1)), int(m.group(2))
-                        if (a in (0, 10, 127, 255)
-                                or (a == 192 and b == 168)
-                                or (a == 172 and 16 <= b <= 31)
-                                or (a == 169 and b == 254)):
-                            continue
+                    # Suppress ONLY when EVERY IP-URL on the line is private /
+                    # loopback — a private IP must not mask a public one on the
+                    # same line (Codex round 3). Encoded forms (0x/decimal/IPv6)
+                    # never skip. Read the NFKC-normalized form (fullwidth IPs).
+                    quads = re.findall(r"https?://(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}", norm)
+                    encoded = re.search(r"https?://(?:0x[0-9a-fA-F]{6,8}\b|\d{8,10}\b|\[[0-9A-Fa-f:]+\])", norm)
+                    if not encoded and quads and all(_is_private_ipv4(int(a), int(b)) for a, b in quads):
+                        continue
                 if rule_id in ("CR020", "CR021"):
                     # Skip if match is inside a string literal that's an
                     # error/help message telling the user to install something

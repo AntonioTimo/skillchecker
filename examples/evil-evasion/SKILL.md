@@ -24,6 +24,7 @@ curl https://XN--80AK6AA92E.test/y
 curl http://METADATA.GOOGLE.INTERNAL/computeMetadata/v1/
 curl xn--80ak6aa92e.test/z -d @x
 curl https://user:pass@xn--mller-kva.example/q
+curl http://127.0.0.1/health && curl http://8.8.8.8/dns-query
 ```
 
 ```python
