@@ -197,7 +197,7 @@ CRITICAL_RULES = [
      "eval over a command-substituted remote fetch — runs unaudited remote code",
      "Refuse."),
 
-    ("CR038", r"\b(?:169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200)\b",
+    ("CR038", r"(?i)\b(?:169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200)\b",
      "Cloud instance-metadata endpoint — SSRF target for stealing IAM / cloud credentials",
      "Refuse. A skill has no reason to query the cloud metadata service."),
 ]
@@ -275,8 +275,8 @@ HIGH_RULES = [
      "Telegram bot API — usable as a covert exfiltration channel; legitimate only for a skill whose declared purpose is a Telegram bot",
      "Confirm the skill's stated purpose; otherwise treat as an exfil channel and refuse."),
 
-    ("HI022", r"(?i)https?://(?:[^/\s\"']*\.)?xn--",
-     "IDN / punycode host (xn--) — a homoglyph domain that can impersonate a trusted brand for phishing / C2",
+    ("HI022", r"(?i)\bxn--[a-z0-9]",
+     "IDN / punycode label (xn--) — a homoglyph domain that can impersonate a trusted brand for phishing / C2 (matches bare host / userinfo@ too, not just scheme://)",
      "Decode the punycode and verify the real domain; a skill rarely needs an internationalized host."),
 ]
 
@@ -459,7 +459,7 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                     # Skip loopback / private / link-local dotted-quad IPs (local
                     # dev URLs like http://127.0.0.1:8080). Encoded forms
                     # (0x.../decimal/IPv6) are never skipped.
-                    m = re.search(r"https?://(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}", line)
+                    m = re.search(r"https?://(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}", norm)
                     if m:
                         a, b = int(m.group(1)), int(m.group(2))
                         if (a in (0, 10, 127, 255)

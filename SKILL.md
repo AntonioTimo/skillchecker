@@ -381,6 +381,16 @@ contain bidi embeddings/isolates (the HIGH variant, not the CRITICAL override); 
 bilingual skill's hyphenated compounds and glued jargon do **not** trip `UNI004`,
 which fires only on a confusable embedded *inside* a Latin word.
 
+**Normalization & homoglyph domains (v1.5.0).** The static scan also tests an
+**NFKC-normalized** copy of each line, so a command written in fullwidth,
+compatibility, or math-styled characters surfaces as its ASCII form — such a
+finding is tagged "revealed by NFKC normalization". Two related rules ride here:
+`CR038` (the cloud instance-metadata endpoint at 169.254.169.254 /
+metadata.google.internal — an SSRF / IAM-credential-theft target → CRITICAL) and
+`HI022` (an IDN punycode host, the xn-- ACE prefix — a homoglyph domain → HIGH).
+Both match case-insensitively and in bare-host / userinfo forms, not just full
+`scheme://` URLs.
+
 ---
 
 ## Step 7 — Description-vs-behavior consistency

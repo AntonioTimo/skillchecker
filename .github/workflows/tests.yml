@@ -278,7 +278,7 @@ jobs:
           import json, sys
           data = json.load(open("/tmp/out.json"))
           rules = {f["rule_id"] for f in data["findings"]}
-          required = {"CR038": "cloud-metadata SSRF", "HI022": "IDN/punycode host", "CR001": "fullwidth pipe-to-shell via NFKC"}
+          required = {"CR038": "cloud-metadata SSRF", "HI022": "IDN/punycode host", "CR001": "fullwidth pipe-to-shell via NFKC", "HI007": "math-styled exec via NFKC"}
           missing = [(k, v) for k, v in required.items() if k not in rules]
           if missing:
               print("::error::evil-evasion missing expected catches:")
