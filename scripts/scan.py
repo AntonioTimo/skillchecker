@@ -263,7 +263,7 @@ HIGH_RULES = [
      "JavaScript dynamic code execution / base64 decode — common obfuscation pattern",
      "Refuse if used over non-literal input."),
 
-    ("HI019", r"(?i)https?://(?:[^/\s]*@)?(?:\d{1,3}(?:\.\d{1,3}){3}|0x[0-9a-fA-F]{6,8}\b|\d{8,10}\b|\[[0-9A-Fa-f:]+\])",
+    ("HI019", r"(?i)https?://(?:[^/\s]*@)?(?:\d{1,3}(?:\.\d{1,3}){3}|0x[0-9a-fA-F]{6,8}\b|\d{8,10}\b|\[[0-9A-Fa-f:]+\])(?![^/?#\s]*@)",
      "IP-literal or numeric-encoded IP in a URL — bypasses domain blocklists; a hardcoded public/encoded host is a common C2 / exfil pattern",
      "Verify the destination. A public IP literal or an encoded IP (hex/decimal) is suspicious; prefer a named, documented endpoint."),
 
@@ -475,8 +475,8 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                     # loopback — a private IP must not mask a public one on the same
                     # line, and userinfo (user:pass@HOST) must not be read as the
                     # host (Codex rounds 3–4). Encoded forms never skip.
-                    quads = re.findall(r"(?i)https?://(?:[^/\s]*@)?(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}", norm)
-                    encoded = re.search(r"(?i)https?://(?:[^/\s]*@)?(?:0x[0-9a-fA-F]{6,8}\b|\d{8,10}\b|\[[0-9A-Fa-f:]+\])", norm)
+                    quads = re.findall(r"(?i)https?://(?:[^/\s]*@)?(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}(?![^/?#\s]*@)", norm)
+                    encoded = re.search(r"(?i)https?://(?:[^/\s]*@)?(?:0x[0-9a-fA-F]{6,8}\b|\d{8,10}\b|\[[0-9A-Fa-f:]+\])(?![^/?#\s]*@)", norm)
                     if not encoded and quads and all(_is_private_ipv4(int(a), int(b)) for a, b in quads):
                         continue
                 if rule_id in ("CR020", "CR021"):

@@ -22,6 +22,7 @@ Legit compatibility characters that must NOT trip the NFKC re-scan.
 ```bash
 echo "½ off — ™ brand — the ﬁ ligature — 設定ファイル"
 curl http://１２７．０．０．１:8080/health
+curl http://8.8.8.8@example.com/path
 ```
 
 Inline values: `api.example.com` (a named host), the price `¾ unit`, the `№ 5`.
