@@ -26,6 +26,9 @@ First v3 increment: **Evasion v2** — normalization and homoglyph-domain covera
 - CI now requires `HI019` on `evil-evasion` and `CR001` on `evil-bypass`; the `scan_file` docstring now matches the actual fence / inline / prose behavior.
 - **Case-insensitivity swept across all host/domain/URL rules** — `CR026`, `CR034`, `HI021` joined `CR038`/`HI022`, so `HTTP://`, `WEBHOOK.SITE`, `TRYCLOUDFLARE.COM` no longer evade. (Command rules like `curl … | sh` stay case-sensitive — the shell is.)
 - **`HI019` host detection rebuilt on `urllib.parse` + `ipaddress` + `shlex`.** The old regex host-extraction spawned a sibling bug every review round — scheme case (`HTTP://`), `userinfo@`, multiple `@` (`user@127.0.0.1@8.8.8.8`), scheme-less bare-IP targets, and `-H`/`-o` flag values mistaken for hosts. It now pulls the real host out of every URL and every `curl`/`wget`/`fetch`/`nc`/`ncat`/`netcat`/`telnet`/`ssh` target and classifies it with the stdlib, covering IPv6, `ftp://`, and hex/decimal-encoded IPs, while skipping named hosts, loopback/private/reserved/link-local, an IP that sits in the userinfo, and flag values. The regex is now only a cheap trigger.
+- **`HI019` reads host-bearing `curl` options** — `-x` / `--proxy` / `--url` / `--resolve` / `--connect-to` / `--socks5` carry the destination, so a public IP behind a proxy or a custom resolve (`--resolve example.com:443:8.8.8.8`) is classified instead of skipped like a `-H` / `-o` data value.
+- **`HI019` host walk resets on shell separators** (`;` `|` `&&` `||` `&`) — `curl https://api.example.com && echo 8.8.8.8` no longer false-flags the echoed IP as the request target.
+- **`HI019` encoded IP always flags** — a hex / decimal host (`0x7f000001`, `2130706433`) is reported even when it decodes to loopback; writing an IP in encoded form is itself the evasion signal (a plainly-written `127.0.0.1` stays fine).
 
 ## [1.4.0] — 2026-06-01
 

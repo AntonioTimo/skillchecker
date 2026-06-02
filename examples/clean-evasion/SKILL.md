@@ -26,6 +26,8 @@ curl http://8.8.8.8@example.com/path
 curl 127.0.0.1/health
 curl -o 8.8.8.8 https://api.example.com/file
 curl -H "X-Forwarded-For: 8.8.8.8" https://api.example.com/
+curl https://api.example.com && echo 8.8.8.8
+curl https://api.example.com | grep 8.8.8.8
 ```
 
 Inline values: `api.example.com` (a named host), the price `¾ unit`, the `№ 5`.

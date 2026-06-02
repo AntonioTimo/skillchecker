@@ -345,6 +345,15 @@ ALL_RULES = (
 
 _NET_CMDS = {"curl", "wget", "fetch", "nc", "ncat", "netcat", "telnet", "ssh"}
 
+# curl/wget options whose VALUE is itself a network host / IP — a proxy, an
+# explicit URL, or a custom address override. Unlike -H / -o / -d (whose values
+# are headers / files / data), their argument must be classified, not skipped.
+_HOST_OPTS = {
+    "-x", "--proxy", "--preproxy",
+    "--socks4", "--socks4a", "--socks5", "--socks5-hostname",
+    "--url", "--resolve", "--connect-to", "--dns-servers",
+}
+
 
 def _ip_publicness(host):
     """'public' / 'private' / None — classify a host token as an IP literal.
@@ -383,11 +392,43 @@ def _ip_publicness(host):
     return "public"
 
 
+def _hosts_from_token(tok):
+    """Every host / IP candidate inside one positional token or option value.
+    Handles scheme URLs, `userinfo@`, `host:port`, bracketed IPv6, and the
+    colon/comma-joined option formats of `--resolve` (host:port:addr[,addr]) and
+    `--connect-to` (h1:p1:h2:p2) — where the real destination is an inner field."""
+    if not tok:
+        return []
+    if "://" in tok:
+        try:
+            hn = urlsplit(tok).hostname
+        except ValueError:
+            hn = None
+        return [hn] if hn else []
+    v = tok.split("/", 1)[0]          # drop any /path
+    if "@" in v:
+        v = v.rsplit("@", 1)[1]       # drop userinfo
+    out = []
+    whole = v.strip("[]")             # bracketed IPv6 -> bare
+    if whole.count(":") == 1:         # host:port (single colon, not IPv6) -> strip port
+        out.append(whole.rsplit(":", 1)[0])
+    else:
+        out.append(whole)
+    if v.count(":") >= 2:             # multi-field option value (resolve / connect-to)
+        out.extend(f.strip("[]") for f in re.split(r"[:,]", v))
+    return [h for h in out if h]
+
+
 def _candidate_hosts(text):
-    """Hosts referenced in a line — from URLs (parsed with urlsplit, which handles
-    userinfo / port / IPv6 / multiple-@) and from bare network-command targets
-    (tokenized with shlex; flags and their values are skipped, so `-H`/`-o` values
-    are not mistaken for the host)."""
+    """Hosts referenced in a line.
+
+    Two passes: (1) every `scheme://…` URL anywhere in the raw text, parsed with
+    `urlsplit` (handles userinfo / port / IPv6 / multiple-@); (2) scheme-less
+    hosts in network commands. The second pass walks each shell command segment
+    independently — split on `;` `|` `&&` `||` `&` so one command's reach does
+    not leak past a separator — and within a segment distinguishes a host-bearing
+    option value (`--proxy`/`--url`/`--resolve`/…) from a data/file flag value
+    (`-H`/`-o`/`-d`, whose argument is skipped) from a positional request target."""
     hosts = []
     for m in re.finditer(r"(?i)\b(?:https?|ftps?)://[^\s\"'<>)\]]+", text):
         try:
@@ -396,34 +437,39 @@ def _candidate_hosts(text):
             hn = None
         if hn:
             hosts.append(hn)
-    try:
-        toks = shlex.split(text, posix=True)
-    except ValueError:
-        toks = text.split()
-    active = False
-    for i, t in enumerate(toks):
-        if t.lower().rsplit("/", 1)[-1] in _NET_CMDS:
-            active = True
-            continue
-        if not active or t.startswith("-"):
-            continue
-        if i > 0 and toks[i - 1].startswith("-"):
-            continue  # this token is the value of a flag, not the target
-        cand = t
-        if "://" in cand:
-            try:
-                cand = urlsplit(cand).hostname or ""
-            except ValueError:
-                cand = ""
-        else:
-            cand = cand.split("/", 1)[0]
-            if "@" in cand:
-                cand = cand.rsplit("@", 1)[1]
-            cand = cand.strip("[]")
-            if cand.count(":") == 1:
-                cand = cand.rsplit(":", 1)[0]
-        if cand:
-            hosts.append(cand)
+    for segment in re.split(r"(?:&&|\|\||[;|&])", text):
+        try:
+            toks = shlex.split(segment, posix=True)
+        except ValueError:
+            toks = segment.split()
+        active = False
+        want_host_value = False  # next token is a host (after --proxy / --url / …)
+        skip_value = False       # next token is a data/file flag's value (-H / -o / …)
+        for t in toks:
+            if t.lower().rsplit("/", 1)[-1] in _NET_CMDS:
+                active = True
+                want_host_value = skip_value = False
+                continue
+            if not active:
+                continue
+            if want_host_value:
+                hosts.extend(_hosts_from_token(t))
+                want_host_value = False
+                continue
+            if skip_value:
+                skip_value = False
+                continue
+            if t.startswith("-"):
+                name, eq, val = t.partition("=")
+                if name in _HOST_OPTS:
+                    if eq:
+                        hosts.extend(_hosts_from_token(val))
+                    else:
+                        want_host_value = True
+                elif not eq:
+                    skip_value = True  # space-separated flag: next token is its value
+                continue
+            hosts.extend(_hosts_from_token(t))  # positional request target
     return hosts
 
 

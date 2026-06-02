@@ -32,6 +32,8 @@ curl 8.8.8.8/dns-query
 curl 0x08080808/probe
 nc 8.8.8.8 4444
 curl ftp://8.8.8.8/file
+curl --proxy 8.8.8.8:8080 https://example.com/
+curl --resolve example.com:443:8.8.8.8 https://example.com/
 ```
 
 ```python
