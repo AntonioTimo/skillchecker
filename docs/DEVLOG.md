@@ -147,9 +147,13 @@ target — escalate-only, so fullwidth/compat commands surface while legit `½`/
 do not. `CR038` cloud-metadata SSRF; `HI022` IDN/punycode host.
 
 **Verified.** evil-evasion GREEN→RED (CR001/HI007 via NFKC, CR038, HI022);
-clean-evasion GREEN; no regressions across the 13 fixtures. Two code-review rounds
-hardened it further (case-insensitive host rules, bare-host/userinfo punycode, the
-HI019 private-masks-public bug, and a defensive inline-code guard).
+clean-evasion GREEN; no regressions across the 13 fixtures. Five code-review
+rounds hardened it further — case-insensitive host rules; bare-host / userinfo /
+multiple-`@` IP & punycode parsing; the HI019 private-masks-public bug; and
+(after a too-broad first attempt) dropping generic defensive-intent inference in
+favour of scanning inline code as code, with suppression left to narrow
+position-based guards. The recurring lesson: don't infer intent from one word in
+the regex layer.
 
 `docs/ROADMAP.md` lays out the rest of the v3 backlog (taint/data-flow, JS AST,
 supply-chain, …).

@@ -20,8 +20,8 @@ out of scope" item or a spec "Non-goals" line.
 ### Deepen existing passes
 - **E — Evasion v2 (✅ shipped in v1.5.0):** NFKC normalization pre-scan (fullwidth /
   compatibility-character evasion), IDN / punycode + homoglyph domains, and the
-  cloud-metadata SSRF endpoint (`169.254.169.254`) that the `HI019` link-local
-  guard currently skips. *Source: spec B's "full TR39 / NFKC / IDN homoglyphs"
+  cloud-metadata SSRF endpoint (`CR038`) that `HI019`'s link-local guard would
+  otherwise skip. *Source: spec B's "full TR39 / NFKC / IDN homoglyphs"
   non-goal, plus a guard gap found after v1.4.0.*
 - **Taint / data-flow AST:** cross-function flow so a dangerous sink fed by a
   traced value is distinguished. *Source: THREAT_MODEL #4, spec A.* Caveat: must

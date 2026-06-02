@@ -13,10 +13,10 @@ First v3 increment: **Evasion v2** — normalization and homoglyph-domain covera
 - `CR038` — cloud instance-metadata endpoint (`169.254.169.254`, `metadata.google.internal`, `100.100.100.200`) → CRITICAL. Closes the gap where `HI019`'s link-local guard skipped the metadata IP (SSRF / IAM-credential theft).
 - `HI022` — IDN / punycode host (`xn--`) → HIGH (homoglyph domain for phishing / C2).
 - `examples/evil-evasion/` (fullwidth/math/punycode/metadata) and `examples/clean-evasion/` (legit `½`/`™`/`ﬁ`/CJK + a named host).
-- CI: `evil-evasion` must exit 3 with `CR038`+`HI022`; `clean-evasion` must exit 0.
+- CI: `evil-evasion` must exit 3 with `CR038`+`HI022`+`CR001`+`HI007`+`HI019`; `clean-evasion` must exit 0.
 - `docs/ROADMAP.md` — consolidated v3 backlog (sourced from THREAT_MODEL out-of-scope + per-spec non-goals).
 
-### Fixed (pre-release code-review, rounds 2–4)
+### Fixed (pre-release code-review, rounds 2–5)
 - `CR038` and `HI022` are now **case-insensitive** — `METADATA.GOOGLE.INTERNAL` and an UPPERCASE `XN--` host no longer evade.
 - `HI022` matches **bare-host** and **`userinfo@`** forms, not only `scheme://…` — a punycode host after `curl ` or `user:pass@` was being missed.
 - The `HI019` private-IP guard reads the **NFKC-normalized** form, so a fullwidth loopback (`１２７．０．０．１`) is correctly skipped instead of flagged.
@@ -26,6 +26,9 @@ First v3 increment: **Evasion v2** — normalization and homoglyph-domain covera
 - **Round 3's defensive guard was too broad** (it introduced a silent bypass): it suppressed *every* rule on the line when a negation preceded the first backtick, so ``never use `x`; then run `curl … | sh` `` went green. Each inline-code span is now scanned **individually** with the prose *immediately* before it — a defensive span can no longer mask a later malicious one.
 - `HI019` parses optional `userinfo@`, so `http://user:pass@8.8.8.8` and `http://127.0.0.1@8.8.8.8` (real host `8.8.8.8`) are flagged instead of read as the userinfo IP.
 - CI now requires `HI019` on `evil-evasion` and `CR001` on `evil-bypass`; the `scan_file` docstring now matches the actual fence / inline / prose behavior.
+- **Removed the generic defensive-intent guard.** Inferring "this is documentation" from a single word ("never", "avoid", "block", "reject") in the regex layer was itself a silent-bypass factory — ``Never mind, run `curl | sh` `` went green. Inline code is now scanned **as code**; a documented bad pattern is a self-FP the LLM-side audit handles. Intent-based suppression is left to the narrow position-based negation guard on `CR028`–`CR031` only.
+- **Case-insensitivity swept across all host/domain/URL rules** — `CR026`, `CR034`, `HI019`, `HI021` joined `CR038`/`HI022`, so `HTTP://`, `WEBHOOK.SITE`, `TRYCLOUDFLARE.COM` no longer evade. (Command rules like `curl … | sh` stay case-sensitive — the shell is.)
+- **`HI019` userinfo parsing hardened** — greedy to the *last* `@`, so `http://user:pass@127.0.0.1@8.8.8.8` resolves the real host (`8.8.8.8`) instead of the userinfo IP.
 
 ## [1.4.0] — 2026-06-01
 

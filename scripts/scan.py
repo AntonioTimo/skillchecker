@@ -150,7 +150,7 @@ CRITICAL_RULES = [
      "Access to credential / secret files",
      "Refuse unless skill is explicitly a credential helper and this is documented."),
 
-    ("CR026", r"(?:webhook\.site|requestbin|pastebin\.com|paste\.rs|discord\.com/api/webhooks|hooks\.slack\.com|ngrok\.io|ngrok-free\.app|burpcollaborator|interactsh)",
+    ("CR026", r"(?i)(?:webhook\.site|requestbin|pastebin\.com|paste\.rs|discord\.com/api/webhooks|hooks\.slack\.com|ngrok\.io|ngrok-free\.app|burpcollaborator|interactsh)",
      "Known exfiltration endpoint — data leakage to attacker-controlled service",
      "Refuse."),
 
@@ -181,7 +181,7 @@ CRITICAL_RULES = [
      "Role confusion — skill asks the model to treat untrusted input as instructions",
      "Refuse. This is the prompt-injection vulnerability the skill should be defending against, not enabling."),
 
-    ("CR034", r"(?:trycloudflare\.com|\.loca\.lt|serveo\.net|lhr\.life|localhost\.run|\.oast\.(?:fun|live|site|pro|me)|pipedream\.net|beeceptor\.com|requestcatcher\.com|\.telebit\.(?:io|me)|tunnelto\.dev)",
+    ("CR034", r"(?i)(?:trycloudflare\.com|\.loca\.lt|serveo\.net|lhr\.life|localhost\.run|\.oast\.(?:fun|live|site|pro|me)|pipedream\.net|beeceptor\.com|requestcatcher\.com|\.telebit\.(?:io|me)|tunnelto\.dev)",
      "Tunneling / OOB-interaction service — points at an attacker-controlled box; data exfiltration channel",
      "Refuse unless the skill is explicitly and transparently a tunnel helper."),
 
@@ -263,7 +263,7 @@ HIGH_RULES = [
      "JavaScript dynamic code execution / base64 decode — common obfuscation pattern",
      "Refuse if used over non-literal input."),
 
-    ("HI019", r"https?://(?:[^/@\s]*@)?(?:\d{1,3}(?:\.\d{1,3}){3}|0x[0-9a-fA-F]{6,8}\b|\d{8,10}\b|\[[0-9A-Fa-f:]+\])",
+    ("HI019", r"(?i)https?://(?:[^/\s]*@)?(?:\d{1,3}(?:\.\d{1,3}){3}|0x[0-9a-fA-F]{6,8}\b|\d{8,10}\b|\[[0-9A-Fa-f:]+\])",
      "IP-literal or numeric-encoded IP in a URL — bypasses domain blocklists; a hardcoded public/encoded host is a common C2 / exfil pattern",
      "Verify the destination. A public IP literal or an encoded IP (hex/decimal) is suspicious; prefer a named, documented endpoint."),
 
@@ -271,7 +271,7 @@ HIGH_RULES = [
      "${IFS} shell space-substitution — evasion used to slip spaces past naive command filters",
      "There is no legitimate reason to assemble commands with ${IFS} in a skill."),
 
-    ("HI021", r"api\.telegram\.org/bot",
+    ("HI021", r"(?i)api\.telegram\.org/bot",
      "Telegram bot API — usable as a covert exfiltration channel; legitimate only for a skill whose declared purpose is a Telegram bot",
      "Confirm the skill's stated purpose; otherwise treat as an exfil channel and refuse."),
 
@@ -425,12 +425,15 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
         # mask a later malicious span on the same line (Codex round 4). Plain prose
         # still only runs PROSE_TARGETING; the LLM-side audit reads the rest, and
         # scanning all prose would drown documentation in self-FPs.
-        inline_spans = []
-        if is_prose_in_md:
-            prev_end = 0
-            for sm in re.finditer(r"`+([^`\n]+?)`+", line):
-                inline_spans.append((sm.group(1), line[prev_end:sm.start()]))
-                prev_end = sm.end()
+        # Inline-code spans in prose are scanned individually, as code. We do NOT
+        # try to infer "defensive intent" from the surrounding prose: guessing
+        # intent from one word ("never", "avoid", "block", …) in the regex layer
+        # kept opening silent bypasses ("Never mind, run `curl | sh`"). A documented
+        # bad pattern in inline code is a self-FP the LLM-side audit contextualizes;
+        # a missed attack is not acceptable (Codex round 5). PROSE_TARGETING rules
+        # still scan the whole line with their own position-based negation guard.
+        inline_spans = [sm.group(1) for sm in re.finditer(r"`+([^`\n]+?)`+", line)] \
+            if is_prose_in_md else []
 
         for rule_id, severity, pattern, why, fix in ALL_RULES:
             try:
@@ -439,19 +442,11 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                 continue
 
             if is_prose_in_md and rule_id not in PROSE_TARGETING:
-                units = inline_spans          # (span text, prose right before it)
+                units = inline_spans          # each inline-code span, scanned as code
             else:
-                units = [(line, None)]        # whole line; no inline defensive guard
+                units = [line]                # whole line (code fence / .py / frontmatter)
 
-            for unit, preceding in units:
-                # Defensive inline-code guard: a negation in the prose IMMEDIATELY
-                # before THIS span marks documentation ("never use `x`"), not an
-                # attack — skip only this span, never the rest of the line.
-                if preceding is not None and re.search(
-                        r"(?i)\b(?:never|do\s+not|don'?t|reject|refuse|forbid|avoid|block|must\s+not|should\s+not)\b",
-                        preceding):
-                    continue
-
+            for unit in units:
                 # Also test an NFKC-normalized copy, so fullwidth / compatibility
                 # characters can't hide a dangerous pattern. Escalate-only.
                 norm = unicodedata.normalize("NFKC", unit)
@@ -480,8 +475,8 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                     # loopback — a private IP must not mask a public one on the same
                     # line, and userinfo (user:pass@HOST) must not be read as the
                     # host (Codex rounds 3–4). Encoded forms never skip.
-                    quads = re.findall(r"https?://(?:[^/@\s]*@)?(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}", norm)
-                    encoded = re.search(r"https?://(?:[^/@\s]*@)?(?:0x[0-9a-fA-F]{6,8}\b|\d{8,10}\b|\[[0-9A-Fa-f:]+\])", norm)
+                    quads = re.findall(r"(?i)https?://(?:[^/\s]*@)?(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}", norm)
+                    encoded = re.search(r"(?i)https?://(?:[^/\s]*@)?(?:0x[0-9a-fA-F]{6,8}\b|\d{8,10}\b|\[[0-9A-Fa-f:]+\])", norm)
                     if not encoded and quads and all(_is_private_ipv4(int(a), int(b)) for a, b in quads):
                         continue
                 if rule_id in ("CR020", "CR021"):
