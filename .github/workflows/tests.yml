@@ -263,6 +263,44 @@ jobs:
           print(f"evil-bypass: exit 3 (RED), all {len(required)} bypass-class catches present OK")
           PY
 
+      - name: evil-evasion must exit 3 (RED) with CR038 + HI022
+        run: |
+          set +e
+          python3 scripts/scan.py examples/evil-evasion/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 3 ]; then
+            echo "::error::evil-evasion should exit 3 (RED), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          python3 <<'PY'
+          import json, sys
+          data = json.load(open("/tmp/out.json"))
+          rules = {f["rule_id"] for f in data["findings"]}
+          required = {"CR038": "cloud-metadata SSRF", "HI022": "IDN/punycode host", "CR001": "fullwidth pipe-to-shell via NFKC"}
+          missing = [(k, v) for k, v in required.items() if k not in rules]
+          if missing:
+              print("::error::evil-evasion missing expected catches:")
+              for rule, why in missing:
+                  print(f"  - {rule} ({why})")
+              sys.exit(1)
+          print("evil-evasion: exit 3 (RED), CR038+HI022+NFKC catches present OK")
+          PY
+
+      - name: clean-evasion must exit 0 (GREEN)
+        run: |
+          set +e
+          python3 scripts/scan.py examples/clean-evasion/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::clean-evasion should exit 0 (GREEN), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          echo "::notice::clean-evasion: exit 0 (GREEN) ✓"
+
       - name: Self-audit smoke test (no crash)
         run: |
           # Self-audit IS expected to flag references/*.md (documentation of

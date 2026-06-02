@@ -4,6 +4,18 @@ All notable changes to skill-checker.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.5.0] — 2026-06-02
+
+First v3 increment: **Evasion v2** — normalization and homoglyph-domain coverage.
+
+### Added
+- `scripts/scan.py`: `scan_file` now also tests an **NFKC-normalized** copy of each scannable target, so fullwidth / compatibility-character commands (`ｃｕｒｌ … | sh`, math-styled `exec`) can no longer hide from the regex. Escalate-only — a finding is tagged "revealed by NFKC normalization"; normalization never suppresses a raw match.
+- `CR038` — cloud instance-metadata endpoint (`169.254.169.254`, `metadata.google.internal`, `100.100.100.200`) → CRITICAL. Closes the gap where `HI019`'s link-local guard skipped the metadata IP (SSRF / IAM-credential theft).
+- `HI022` — IDN / punycode host (`xn--`) → HIGH (homoglyph domain for phishing / C2).
+- `examples/evil-evasion/` (fullwidth/math/punycode/metadata) and `examples/clean-evasion/` (legit `½`/`™`/`ﬁ`/CJK + a named host).
+- CI: `evil-evasion` must exit 3 with `CR038`+`HI022`; `clean-evasion` must exit 0.
+- `docs/ROADMAP.md` — consolidated v3 backlog (sourced from THREAT_MODEL out-of-scope + per-spec non-goals).
+
 ## [1.4.0] — 2026-06-01
 
 New detections: **modern exfil / evasion breadth**. The original exfiltration

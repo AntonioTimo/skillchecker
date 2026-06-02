@@ -275,7 +275,7 @@ HIGH_RULES = [
      "Telegram bot API — usable as a covert exfiltration channel; legitimate only for a skill whose declared purpose is a Telegram bot",
      "Confirm the skill's stated purpose; otherwise treat as an exfil channel and refuse."),
 
-    ("HI022", r"https?://(?:[^/\s\"']*\.)?xn--",
+    ("HI022", r"(?i)https?://(?:[^/\s\"']*\.)?xn--",
      "IDN / punycode host (xn--) — a homoglyph domain that can impersonate a trusted brand for phishing / C2",
      "Decode the punycode and verify the real domain; a skill rarely needs an internationalized host."),
 ]

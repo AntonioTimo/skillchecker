@@ -14,6 +14,7 @@ docs → PR → squash-merge → GitHub release.
 | A | Python AST pass | v1.2.0 | [#2](https://github.com/AntonioTimo/skillchecker/pull/2) | ✅ released |
 | B | Unicode / invisible characters | v1.3.0 | [#3](https://github.com/AntonioTimo/skillchecker/pull/3) | ✅ released |
 | D | Exfil / evasion breadth | v1.4.0 | [#4](https://github.com/AntonioTimo/skillchecker/pull/4) | ✅ released |
+| E | Evasion v2 (normalization + homoglyph domains) | v1.5.0 | — | 🚧 in review |
 
 ---
 
@@ -129,3 +130,24 @@ merge, each regression-tested by `examples/evil-bypass/` and broader CI asserts:
 
 Lesson logged: a security tool's worst failure is the **false negative** (a silent
 bypass that reads as 🟢). The review caught four of them before they shipped.
+
+---
+
+## Phase E — Evasion v2 (v1.5.0, in review) · first v3 increment
+
+**Goal.** Close evasion that survives v2: Unicode-normalization tricks and homoglyph domains.
+
+**The gap (RED).** `examples/evil-evasion/` hid `curl … | sh` in **fullwidth**
+glyphs, `exec` in **math-styled** glyphs, an `xn--` punycode host, and the cloud
+metadata IP `169.254.169.254` (which `HI019`'s link-local guard skipped). The
+pre-1.5.0 scanner scored it 🟢 GREEN.
+
+**The fix (GREEN).** `scan_file` now also scans an **NFKC-normalized** copy of each
+target — escalate-only, so fullwidth/compat commands surface while legit `½`/`™`/CJK
+do not. `CR038` cloud-metadata SSRF; `HI022` IDN/punycode host.
+
+**Verified.** evil-evasion GREEN→RED (CR001/HI007 via NFKC, CR038, HI022);
+clean-evasion GREEN; no regressions across 12 fixtures.
+
+`docs/ROADMAP.md` lays out the rest of the v3 backlog (taint/data-flow, JS AST,
+supply-chain, …).
