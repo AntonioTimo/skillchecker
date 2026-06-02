@@ -39,6 +39,7 @@ curl -x8.8.8.8:4444 https://example.com/
 curl --proxy [2001:4860:4860::8888]:8080 https://example.com/
 curl --dns-servers 1.1.1.1,8.8.8.8 https://example.com/
 ssh -i /tmp/k root@8.8.8.8
+curl -X POST 8.8.8.8/dns-query
 ```
 
 ```python

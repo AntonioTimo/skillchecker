@@ -354,11 +354,12 @@ _NET_CMDS = {"curl", "wget", "fetch", "nc", "ncat", "netcat", "telnet", "ssh"}
 # boolean flag never swallows the scheme-less IP target after it. These are
 # curated allowlists, not exhaustive — an exotic option may be missed.
 _CURL_HOST = {
-    "-x", "--proxy", "--preproxy",
+    "-x", "--proxy", "--proxy1.0", "--preproxy",
     "--socks4", "--socks4a", "--socks5", "--socks5-hostname",
     "--url", "--resolve", "--connect-to", "--dns-servers",
 }
 _CURL_DATA = {
+    "-X", "--request",  # HTTP method token — not a host (a literal `-X 8.8.8.8`)
     "-o", "--output", "-T", "--upload-file",
     "-H", "--header", "-d", "--data", "--data-ascii", "--data-binary",
     "--data-raw", "--data-urlencode", "-F", "--form", "--form-string",

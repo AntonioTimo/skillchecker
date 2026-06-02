@@ -33,6 +33,7 @@ First v3 increment: **Evasion v2** — normalization and homoglyph-domain covera
 - **`HI019` parses attached short-option values** — `-x8.8.8.8:8080` (curl's `-Xvalue` form) is read like `--proxy 8.8.8.8:8080` and `--proxy=8.8.8.8:8080`.
 - **`HI019` option grammar is command-aware** (`_CMD_OPTS`) — the same letter differs by tool, so `wget -O <file>` and `ssh -i <identity>` are no longer misread as IP targets, while `curl -x` (proxy) still is and `ssh -x` (boolean) is not. ssh's positional `user@host` and its `-J` / `-W` jump hosts are classified.
 - **`HI019` parses bracketed IPv6 and comma-list option values** — `--proxy [2001:db8::1]:8080` and `--dns-servers 1.1.1.1,8.8.8.8` now surface the inner public IP.
+- **`HI019` skips the `-X` / `--request` method token** — `curl -X 8.8.8.8 https://api.example.com/` no longer misreads the HTTP method as a host (the IP target in `curl -X POST 8.8.8.8/x` still flags); `--proxy1.0` added to the proxy-host set.
 
 ## [1.4.0] — 2026-06-01
 

@@ -31,6 +31,7 @@ curl https://api.example.com && echo 8.8.8.8
 curl https://api.example.com | grep 8.8.8.8
 wget -O 8.8.8.8 https://api.example.com/file
 ssh -i 8.8.8.8 user@example.com
+curl -X 8.8.8.8 https://api.example.com/
 ```
 
 Inline values: `api.example.com` (a named host), the price `¾ unit`, the `№ 5`.

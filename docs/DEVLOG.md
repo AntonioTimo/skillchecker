@@ -168,8 +168,9 @@ kept finding the same *shape* of bug in two subsystems:
   separators so `curl url && echo IP` doesn't misread the echoed IP; and the
   option grammar had to go *command-aware*, because `wget -O` is a file where
   `curl -O` is a flag and `ssh -x` is boolean where `curl -x` is a proxy. The
-  parser is small but it *is* a parser — per-command option arity, bracketed
-  IPv6, comma-list option values and all.
+  parser is small but it *is* a parser — per-command option arity (down to
+  `-X`/`--request` carrying an HTTP method, not a host), bracketed IPv6,
+  comma-list option values and all.
 - *Inline-code intent.* A whole-line, then a per-span, "defensive-intent" guard
   each tried to read ``never use `x` `` as documentation; both leaked. Dropped
   entirely — inline code is scanned as code, suppression left to the narrow
