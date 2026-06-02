@@ -348,17 +348,23 @@ _NET_CMDS = {"curl", "wget", "fetch", "nc", "ncat", "netcat", "telnet", "ssh"}
 
 def _ip_publicness(host):
     """'public' / 'private' / None — classify a host token as an IP literal.
-    Handles dotted IPv4, IPv6, and hex/decimal-encoded IPv4. Uses the stdlib
-    `ipaddress` module so RFC1918 / loopback / link-local / reserved are all
-    covered without hand-rolled octet ranges (Codex: regex host-extraction did
-    not converge)."""
+
+    A plain literal (dotted IPv4 or IPv6) is classified with the stdlib
+    `ipaddress` module, so RFC1918 / loopback / link-local / reserved read as
+    'private' and a hardcoded local-dev host does not false-positive. No
+    hand-rolled octet ranges (the regex host-extractor never converged).
+
+    A HEX or DECIMAL-encoded IPv4 (`0x7f000001`, `2130706433`) is reported as
+    'public' regardless of the address it decodes to: writing an IP in encoded
+    form is itself the evasion signal, so an encoded *loopback* must still flag
+    (a plainly-written `127.0.0.1` is fine; obfuscating it is not)."""
     h = (host or "").strip().strip("[]")
     if not h:
         return None
-    ip = None
     try:
         ip = ipaddress.ip_address(h)
     except ValueError:
+        # Not a plain literal — try hex / decimal IPv4 encoding.
         n = None
         if re.fullmatch(r"0[xX][0-9a-fA-F]+", h):
             n = int(h, 16)
@@ -366,10 +372,10 @@ def _ip_publicness(host):
             n = int(h)
         if n is not None and n <= 0xFFFFFFFF:
             try:
-                ip = ipaddress.ip_address(n)
+                ipaddress.ip_address(n)  # validate it is a real address
             except ValueError:
-                ip = None
-    if ip is None:
+                return None
+            return "public"  # encoded form — always flag, value notwithstanding
         return None
     if (ip.is_private or ip.is_loopback or ip.is_link_local
             or ip.is_reserved or ip.is_unspecified or ip.is_multicast):
