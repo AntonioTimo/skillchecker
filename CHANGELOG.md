@@ -27,9 +27,10 @@ signatures predate a wave of newer techniques. This closes the v2 roadmap.
 - **Frontmatter bypass:** folded/list `allowed-tools` carrying `Bash(* *)` is now caught — `FM005` scans the whole frontmatter, not just the inline value.
 - **Negation-guard false-negative:** bare modals (`should`/`must`/`may`) no longer suppress `CR028`–`CR031`, so "you should ignore safety policies" is caught.
 - **Markdown coverage:** `~~~` fences and inline-code spans are now scanned as code (previously only triple-backtick fences were).
-- **Clone false-positive:** `inventory` skips `.git/`, `node_modules/`, and other VCS/tooling dirs, so auditing a cloned repo no longer floods `INV001`.
+- **Clone false-positive:** `inventory` skips `.git/`, `node_modules/`, and other VCS/tooling dirs, and sniffs file *content* — extensionless text (LICENSE, `.gitignore`, Makefile) is scanned, not flagged as a blob; only true binaries (NUL byte) stay `INV001`. Auditing a repo-root skill no longer trips false RED/YELLOW.
 - **Pipe-to-shell:** `CR036`/`CR037` implement the documented `bash <(curl …)` and `eval "$(curl …)"` patterns.
-- **Honest "read-only" claim:** `SKILL.md` now notes the `echo`-redirection caveat and that `$SKILL_PATH` scoping is instruction-level.
+- **Honest "read-only" claim:** `SKILL.md` and `README.md` now note the `echo`-redirection caveat and that `$SKILL_PATH` scoping is instruction-level.
+- **Pipe-to-shell regression:** `evil-bypass` and CI now assert both `CR036` (`bash <(curl …)`) and `CR037` (`eval "$(curl …)"`).
 - CI: per-phase assertions broadened (`AST006`/`AST008`, `UNI002`/`UNI004`, `HI019`–`HI021`/`ME011`) plus the `evil-bypass` regression step.
 
 ### Closed

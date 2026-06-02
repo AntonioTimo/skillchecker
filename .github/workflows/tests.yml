@@ -253,7 +253,7 @@ jobs:
           import json, sys
           data = json.load(open("/tmp/out.json"))
           rules = {f["rule_id"] for f in data["findings"]}
-          required = {"FM005": "yaml-list Bash(* *)", "CR026": "~~~/inline exfil", "CR029": "bare-modal policy override", "CR036": "process-substitution pipe-to-shell"}
+          required = {"FM005": "yaml-list Bash(* *)", "CR026": "~~~/inline exfil", "CR029": "bare-modal policy override", "CR036": "process-substitution pipe-to-shell", "CR037": "eval-substitution pipe-to-shell"}
           missing = [(k, v) for k, v in required.items() if k not in rules]
           if missing:
               print("::error::evil-bypass missing expected catches:")

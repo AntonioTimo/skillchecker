@@ -1009,6 +1009,24 @@ def unicode_scan(path: Path, rel: str) -> list[Finding]:
     return findings
 
 
+def _looks_like_text(path: Path) -> bool:
+    """Sniff a file's first chunk: text if it has no NUL byte and decodes as
+    UTF-8 (a multibyte char cut at the chunk boundary is tolerated). Lets
+    extensionless text files (LICENSE, .gitignore, Makefile) be scanned instead
+    of flagged as unauditable blobs (Codex)."""
+    try:
+        chunk = path.read_bytes()[:8192]
+    except OSError:
+        return False
+    if b"\x00" in chunk:
+        return False
+    try:
+        chunk.decode("utf-8")
+        return True
+    except UnicodeDecodeError as e:
+        return e.start >= len(chunk) - 4  # only trailing boundary-cut bytes failed
+
+
 def inventory(skill_root: Path) -> dict:
     """Walk the skill dir and classify every file."""
     text_files: list[str] = []
@@ -1037,7 +1055,7 @@ def inventory(skill_root: Path) -> dict:
         except OSError:
             pass
 
-        if p.suffix.lower() in TEXT_EXTENSIONS:
+        if p.suffix.lower() in TEXT_EXTENSIONS or _looks_like_text(p):
             text_files.append(p.relative_to(skill_root).as_posix())
         else:
             other_files.append(p.relative_to(skill_root).as_posix())

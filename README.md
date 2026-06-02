@@ -20,9 +20,12 @@ Output is one of three verdicts:
   You apply manually, re-run, iterate to GREEN.
 - 🟢 **GREEN** — safe to install. Install command + brief usage included.
 
-Read-only by design: the `allowed-tools` list contains zero
-write/delete/network operations. The auditor cannot modify the skill being
-audited, your filesystem, or anything else.
+Read-only by design: the `allowed-tools` list contains no `rm`, `cp`, `mv`,
+`tee`, `mkdir`, package-install, or network commands, and no interpreter
+wildcard — only `test`, `echo` (diagnostics), and the pinned `scan.py`. `echo`
+could in principle redirect to a file; the skill never does, and you can audit
+that. Path scoping is enforced at the instruction level (the Checker Scope
+Rules), since `Read`/`Glob`/`Grep` are not themselves path-restricted.
 
 ---
 
