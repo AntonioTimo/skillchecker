@@ -164,9 +164,12 @@ kept finding the same *shape* of bug in two subsystems:
   `--resolve`/`--connect-to`, including the attached `-x8.8.8.8` form) carry the
   destination and must be read, not skipped like data flags; data-flag skipping
   had to become an explicit *allowlist* so a boolean flag (`-s`/`-L`/`--fail`)
-  stops swallowing the IP target after it; and the command walk must reset on
-  shell separators so `curl url && echo IP` doesn't misread the echoed IP. The
-  parser is small but it *is* a parser — option arity and all.
+  stops swallowing the IP target after it; the command walk must reset on shell
+  separators so `curl url && echo IP` doesn't misread the echoed IP; and the
+  option grammar had to go *command-aware*, because `wget -O` is a file where
+  `curl -O` is a flag and `ssh -x` is boolean where `curl -x` is a proxy. The
+  parser is small but it *is* a parser — per-command option arity, bracketed
+  IPv6, comma-list option values and all.
 - *Inline-code intent.* A whole-line, then a per-span, "defensive-intent" guard
   each tried to read ``never use `x` `` as documentation; both leaked. Dropped
   entirely — inline code is scanned as code, suppression left to the narrow

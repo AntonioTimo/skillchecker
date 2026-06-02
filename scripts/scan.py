@@ -345,21 +345,20 @@ ALL_RULES = (
 
 _NET_CMDS = {"curl", "wget", "fetch", "nc", "ncat", "netcat", "telnet", "ssh"}
 
-# curl/wget options whose VALUE is itself a network host / IP — a proxy, an
-# explicit URL, or a custom address override. Unlike -H / -o / -d (whose values
-# are headers / files / data), their argument must be classified, not skipped.
-_HOST_OPTS = {
+# Option grammar is COMMAND-AWARE: the same letter means different things per
+# tool (`curl -x` is a proxy host; `ssh -x` is boolean X11; `curl -O` is boolean
+# but `wget -O` takes an output file). For each net command we list:
+#   HOST opts — value is a network host / IP -> classify it;
+#   DATA opts — value is data / a file / a credential / a number -> skip it.
+# Every flag NOT listed is treated as boolean (consumes no following token), so a
+# boolean flag never swallows the scheme-less IP target after it. These are
+# curated allowlists, not exhaustive — an exotic option may be missed.
+_CURL_HOST = {
     "-x", "--proxy", "--preproxy",
     "--socks4", "--socks4a", "--socks5", "--socks5-hostname",
     "--url", "--resolve", "--connect-to", "--dns-servers",
 }
-
-# curl/wget options whose VALUE is data / a file / a credential — the value is
-# skipped (it is not a destination). Only these consume their following token;
-# every other flag is treated as boolean, so a *boolean* flag (-s, -L, --fail)
-# does not swallow the scheme-less IP target that follows it. An allowlist, not
-# "skip the token after any flag" — the latter hid `curl -s 8.8.8.8/x`.
-_DATA_OPTS = {
+_CURL_DATA = {
     "-o", "--output", "-T", "--upload-file",
     "-H", "--header", "-d", "--data", "--data-ascii", "--data-binary",
     "--data-raw", "--data-urlencode", "-F", "--form", "--form-string",
@@ -367,7 +366,37 @@ _DATA_OPTS = {
     "-c", "--cookie-jar", "-u", "--user", "-U", "--proxy-user",
     "-w", "--write-out", "-K", "--config", "-E", "--cert", "--cacert",
     "--key", "--capath", "--interface", "-r", "--range",
-    "--trace", "--trace-ascii", "--stderr", "--post-file",
+    "--trace", "--trace-ascii", "--stderr",
+}
+_WGET_DATA = {
+    "-O", "--output-document", "-o", "--output-file", "-a", "--append-output",
+    "--post-file", "--post-data", "--body-file", "--header",
+    "--user", "--password", "--http-user", "--http-password", "-P",
+    "--directory-prefix", "--load-cookies", "--save-cookies",
+    "--ca-certificate", "--certificate", "--private-key", "--referer",
+    "-U", "--user-agent", "--limit-rate", "-t", "--tries", "-T", "--timeout",
+    "--bind-address", "-e", "--execute",
+}
+_SSH_HOST = {"-J", "-W"}  # jump host / stdio-forward destination
+_SSH_DATA = {
+    "-i", "-l", "-p", "-o", "-F", "-E", "-c", "-m", "-b",
+    "-D", "-L", "-R", "-w", "-S", "-Q", "-B", "-e",
+}
+_NC_HOST = {"-x", "--proxy"}
+_NC_DATA = {
+    "-p", "-s", "-w", "-X", "-b", "-I", "-O", "-q", "-T", "-G", "-i",
+    "--source", "--source-port", "--proxy-type",
+}
+# net command -> (host-value options, data/file-value options)
+_CMD_OPTS = {
+    "curl": (_CURL_HOST, _CURL_DATA),
+    "fetch": (_CURL_HOST, _CURL_DATA),
+    "wget": (frozenset(), _WGET_DATA),
+    "ssh": (_SSH_HOST, _SSH_DATA),
+    "nc": (_NC_HOST, _NC_DATA),
+    "ncat": (_NC_HOST, _NC_DATA),
+    "netcat": (_NC_HOST, _NC_DATA),
+    "telnet": (frozenset(), frozenset()),
 }
 
 
@@ -410,9 +439,10 @@ def _ip_publicness(host):
 
 def _hosts_from_token(tok):
     """Every host / IP candidate inside one positional token or option value.
-    Handles scheme URLs, `userinfo@`, `host:port`, bracketed IPv6, and the
-    colon/comma-joined option formats of `--resolve` (host:port:addr[,addr]) and
-    `--connect-to` (h1:p1:h2:p2) — where the real destination is an inner field."""
+    Handles scheme URLs, `userinfo@`, `host:port`, bracketed IPv6 (with optional
+    `:port`), and the colon/comma-joined option formats of `--resolve`
+    (host:port:addr[,addr]), `--connect-to` (h1:p1:h2:p2) and `--dns-servers`
+    (a,b) — where the real destination is an inner field."""
     if not tok:
         return []
     if "://" in tok:
@@ -425,12 +455,16 @@ def _hosts_from_token(tok):
     if "@" in v:
         v = v.rsplit("@", 1)[1]       # drop userinfo
     out = []
-    whole = v.strip("[]")             # bracketed IPv6 -> bare
-    if whole.count(":") == 1:         # host:port (single colon, not IPv6) -> strip port
-        out.append(whole.rsplit(":", 1)[0])
+    m = re.match(r"^\[([0-9A-Fa-f:]+)\](?::\d+)?$", v)
+    if m:                            # bracketed IPv6, optional :port -> [2001:db8::1]:443
+        out.append(m.group(1))
+    elif v.count(":") == 1:          # host:port (single colon, not IPv6) -> strip port
+        out.append(v.rsplit(":", 1)[0])
     else:
-        out.append(whole)
-    if v.count(":") >= 2:             # multi-field option value (resolve / connect-to)
+        out.append(v.strip("[]"))
+    if "," in v or v.count(":") >= 2:
+        # comma / multi-colon option value: --dns-servers a,b ; --resolve
+        # host:port:addr ; --connect-to h1:p1:h2:p2 — scan each field for an IP.
         out.extend(f.strip("[]") for f in re.split(r"[:,]", v))
     return [h for h in out if h]
 
@@ -458,7 +492,9 @@ def _candidate_hosts(text):
     option value (`--proxy`/`--url`/`--resolve`/…, classified) from a data/file
     flag value (`-H`/`-o`/`-d`, skipped) from a boolean flag (`-s`/`-L`/`--fail`,
     which does not consume the IP target that follows it) from a positional
-    request target."""
+    request target. The option grammar is per-command (`_CMD_OPTS`), since the
+    same letter differs by tool — `wget -O` is an output file, `ssh -i` an
+    identity file, `ssh -x` boolean, while `curl -x` is a proxy host."""
     hosts = []
     for m in re.finditer(r"(?i)\b(?:https?|ftps?)://[^\s\"'<>)\]]+", text):
         try:
@@ -473,11 +509,14 @@ def _candidate_hosts(text):
         except ValueError:
             toks = segment.split()
         active = False
+        host_opts = data_opts = frozenset()  # option grammar of the active command
         want_host_value = False  # next token is a host (after --proxy / --url / …)
         skip_value = False       # next token is a data/file flag's value (-H / -o / …)
         for t in toks:
-            if t.lower().rsplit("/", 1)[-1] in _NET_CMDS:
+            base = t.lower().rsplit("/", 1)[-1]
+            if base in _NET_CMDS:
                 active = True
+                host_opts, data_opts = _CMD_OPTS.get(base, (frozenset(), frozenset()))
                 want_host_value = skip_value = False
                 continue
             if not active:
@@ -491,13 +530,13 @@ def _candidate_hosts(text):
                 continue
             if t.startswith("-"):
                 name, attached = _split_opt(t)
-                if name in _HOST_OPTS:
+                if name in host_opts:
                     if attached is not None:   # --proxy=host / -xhost
                         hosts.extend(_hosts_from_token(attached))
                     else:                      # --proxy host  (value is next token)
                         want_host_value = True
-                elif name in _DATA_OPTS and attached is None:
-                    skip_value = True          # -H header  (value is next token)
+                elif name in data_opts and attached is None:
+                    skip_value = True          # -o file  (value is next token)
                 # boolean / unknown flag, or attached data value: do not skip;
                 # the following token is classified as the positional target.
                 continue

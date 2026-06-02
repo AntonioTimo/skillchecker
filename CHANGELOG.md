@@ -31,6 +31,8 @@ First v3 increment: **Evasion v2** — normalization and homoglyph-domain covera
 - **`HI019` encoded IP always flags** — a hex / decimal host (`0x7f000001`, `2130706433`) is reported even when it decodes to loopback; writing an IP in encoded form is itself the evasion signal (a plainly-written `127.0.0.1` stays fine).
 - **`HI019` flag handling is an allowlist, not skip-after-any-flag** — only known value-taking data/file options (`-H`/`-o`/`-d`/`-A`/`-u`/…) consume their argument, so a *boolean* flag no longer hides the scheme-less IP that follows it (`curl -s 8.8.8.8/x`, `wget -q 8.8.8.8/x`, `nc -v 8.8.8.8 4444`).
 - **`HI019` parses attached short-option values** — `-x8.8.8.8:8080` (curl's `-Xvalue` form) is read like `--proxy 8.8.8.8:8080` and `--proxy=8.8.8.8:8080`.
+- **`HI019` option grammar is command-aware** (`_CMD_OPTS`) — the same letter differs by tool, so `wget -O <file>` and `ssh -i <identity>` are no longer misread as IP targets, while `curl -x` (proxy) still is and `ssh -x` (boolean) is not. ssh's positional `user@host` and its `-J` / `-W` jump hosts are classified.
+- **`HI019` parses bracketed IPv6 and comma-list option values** — `--proxy [2001:db8::1]:8080` and `--dns-servers 1.1.1.1,8.8.8.8` now surface the inner public IP.
 
 ## [1.4.0] — 2026-06-01
 
