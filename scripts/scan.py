@@ -16,13 +16,16 @@ It opens files for read only. No subprocess, no network, no writes.
 """
 
 import ast
+import ipaddress
 import json
 import os
 import re
+import shlex
 import sys
 import unicodedata
 from dataclasses import dataclass, asdict
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # Files we examine. Anything else is reported as "unaudited file"
 # and the Claude-side review treats binaries / blobs as a strong RED signal.
@@ -263,8 +266,8 @@ HIGH_RULES = [
      "JavaScript dynamic code execution / base64 decode — common obfuscation pattern",
      "Refuse if used over non-literal input."),
 
-    ("HI019", r"(?i)(?:https?://(?:[^/\s]*@)?|(?:curl|wget|fetch)\b[^\n|;&]*?\s)(?:\d{1,3}(?:\.\d{1,3}){3}|0x[0-9a-fA-F]{6,8}\b|\d{8,10}\b|\[[0-9A-Fa-f:]+\])(?![^/?#\s]*@)",
-     "IP-literal or numeric-encoded IP in a URL — bypasses domain blocklists; a hardcoded public/encoded host is a common C2 / exfil pattern",
+    ("HI019", r"(?i)(?:https?|ftps?)://|\b(?:curl|wget|fetch|nc|ncat|netcat|telnet|ssh)\b",
+     "IP-literal or numeric-encoded IP host in a URL / network command — bypasses domain blocklists; a hardcoded public/encoded host is a common C2 / exfil pattern",
      "Verify the destination. A public IP literal or an encoded IP (hex/decimal) is suspicious; prefer a named, documented endpoint."),
 
     ("HI020", r"\$\{IFS\}|\$IFS\b",
@@ -340,10 +343,87 @@ ALL_RULES = (
 )
 
 
-def _is_private_ipv4(a: int, b: int) -> bool:
-    """Loopback / RFC1918 / link-local / reserved by the first two octets."""
-    return (a in (0, 10, 127, 255) or (a == 192 and b == 168)
-            or (a == 172 and 16 <= b <= 31) or (a == 169 and b == 254))
+_NET_CMDS = {"curl", "wget", "fetch", "nc", "ncat", "netcat", "telnet", "ssh"}
+
+
+def _ip_publicness(host):
+    """'public' / 'private' / None — classify a host token as an IP literal.
+    Handles dotted IPv4, IPv6, and hex/decimal-encoded IPv4. Uses the stdlib
+    `ipaddress` module so RFC1918 / loopback / link-local / reserved are all
+    covered without hand-rolled octet ranges (Codex: regex host-extraction did
+    not converge)."""
+    h = (host or "").strip().strip("[]")
+    if not h:
+        return None
+    ip = None
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        n = None
+        if re.fullmatch(r"0[xX][0-9a-fA-F]+", h):
+            n = int(h, 16)
+        elif re.fullmatch(r"\d{8,10}", h):
+            n = int(h)
+        if n is not None and n <= 0xFFFFFFFF:
+            try:
+                ip = ipaddress.ip_address(n)
+            except ValueError:
+                ip = None
+    if ip is None:
+        return None
+    if (ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_unspecified or ip.is_multicast):
+        return "private"
+    return "public"
+
+
+def _candidate_hosts(text):
+    """Hosts referenced in a line — from URLs (parsed with urlsplit, which handles
+    userinfo / port / IPv6 / multiple-@) and from bare network-command targets
+    (tokenized with shlex; flags and their values are skipped, so `-H`/`-o` values
+    are not mistaken for the host)."""
+    hosts = []
+    for m in re.finditer(r"(?i)\b(?:https?|ftps?)://[^\s\"'<>)\]]+", text):
+        try:
+            hn = urlsplit(m.group(0)).hostname
+        except ValueError:
+            hn = None
+        if hn:
+            hosts.append(hn)
+    try:
+        toks = shlex.split(text, posix=True)
+    except ValueError:
+        toks = text.split()
+    active = False
+    for i, t in enumerate(toks):
+        if t.lower().rsplit("/", 1)[-1] in _NET_CMDS:
+            active = True
+            continue
+        if not active or t.startswith("-"):
+            continue
+        if i > 0 and toks[i - 1].startswith("-"):
+            continue  # this token is the value of a flag, not the target
+        cand = t
+        if "://" in cand:
+            try:
+                cand = urlsplit(cand).hostname or ""
+            except ValueError:
+                cand = ""
+        else:
+            cand = cand.split("/", 1)[0]
+            if "@" in cand:
+                cand = cand.rsplit("@", 1)[1]
+            cand = cand.strip("[]")
+            if cand.count(":") == 1:
+                cand = cand.rsplit(":", 1)[0]
+        if cand:
+            hosts.append(cand)
+    return hosts
+
+
+def _public_ip_in(text):
+    """True if the line references a public IP-literal host (URL or command target)."""
+    return any(_ip_publicness(h) == "public" for h in _candidate_hosts(text))
 
 
 def scan_file(path: Path, root: Path) -> list[Finding]:
@@ -471,14 +551,11 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                     if re.search(r"^description:\s*[>|][-+]?\s*$", unit):
                         continue
                 if rule_id == "HI019":
-                    # Suppress ONLY when EVERY IP-URL on the unit is private /
-                    # loopback — a private IP must not mask a public one on the same
-                    # line, and userinfo (user:pass@HOST) must not be read as the
-                    # host (Codex rounds 3–4). Encoded forms never skip.
-                    pfx = r"(?:https?://(?:[^/\s]*@)?|(?:curl|wget|fetch)\b[^\n|;&]*?\s)"
-                    quads = re.findall(r"(?i)" + pfx + r"(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}(?![^/?#\s]*@)", norm)
-                    encoded = re.search(r"(?i)" + pfx + r"(?:0x[0-9a-fA-F]{6,8}\b|\d{8,10}\b|\[[0-9A-Fa-f:]+\])(?![^/?#\s]*@)", norm)
-                    if not encoded and quads and all(_is_private_ipv4(int(a), int(b)) for a, b in quads):
+                    # Decide via real host extraction (urllib + ipaddress), not a
+                    # second regex kept in sync with the rule: flag only if a URL or
+                    # network-command target resolves to a PUBLIC IP literal. Named
+                    # hosts, loopback/private, userinfo IPs, and flag values all skip.
+                    if not _public_ip_in(norm):
                         continue
                 if rule_id in ("CR020", "CR021"):
                     # Skip an install command inside an error/help string literal.

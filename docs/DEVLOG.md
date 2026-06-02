@@ -147,13 +147,26 @@ target — escalate-only, so fullwidth/compat commands surface while legit `½`/
 do not. `CR038` cloud-metadata SSRF; `HI022` IDN/punycode host.
 
 **Verified.** evil-evasion GREEN→RED (CR001/HI007 via NFKC, CR038, HI022);
-clean-evasion GREEN; no regressions across the 13 fixtures. Five code-review
-rounds hardened it further — case-insensitive host rules; bare-host / userinfo /
-multiple-`@` IP & punycode parsing; the HI019 private-masks-public bug; and
-(after a too-broad first attempt) dropping generic defensive-intent inference in
-favour of scanning inline code as code, with suppression left to narrow
-position-based guards. The recurring lesson: don't infer intent from one word in
-the regex layer.
+clean-evasion GREEN; no regressions across the 13 fixtures.
+
+**Then the code-review rounds.** An external Codex pass hammered the branch and
+kept finding the same *shape* of bug in two subsystems:
+
+- *Host-form detection (`HI019`).* Round after round surfaced a new sibling —
+  scheme case (`HTTP://`), `userinfo@`, multiple `@`, scheme-less bare-IP
+  targets, `-H`/`-o` flag values read as hosts, then `nc`/`telnet`/`ssh`/`ftp`
+  gaps. Patching one regex spawned the next. Converged by **rebuilding host
+  extraction on `urllib.parse` + `ipaddress` + `shlex`** and demoting the regex
+  to a cheap trigger — IPv6, `ftp://`, and hex/decimal IPs fall out of the
+  stdlib for free, and the `-H`/`-o` false positives vanish.
+- *Inline-code intent.* A whole-line, then a per-span, "defensive-intent" guard
+  each tried to read ``never use `x` `` as documentation; both leaked. Dropped
+  entirely — inline code is scanned as code, suppression left to the narrow
+  position-based negation guards on `CR028`–`CR031`.
+
+The doubled lesson: **when a regex subsystem keeps spawning siblings, replace it
+structurally** — don't patch the Nth instance, and don't infer intent in the
+regex layer.
 
 `docs/ROADMAP.md` lays out the rest of the v3 backlog (taint/data-flow, JS AST,
 supply-chain, …).

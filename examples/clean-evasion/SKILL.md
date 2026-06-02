@@ -24,6 +24,8 @@ echo "½ off — ™ brand — the ﬁ ligature — 設定ファイル"
 curl http://１２７．０．０．１:8080/health
 curl http://8.8.8.8@example.com/path
 curl 127.0.0.1/health
+curl -o 8.8.8.8 https://api.example.com/file
+curl -H "X-Forwarded-For: 8.8.8.8" https://api.example.com/
 ```
 
 Inline values: `api.example.com` (a named host), the price `¾ unit`, the `№ 5`.
