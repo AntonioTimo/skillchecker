@@ -260,7 +260,7 @@ jobs:
               for rule, why in missing:
                   print(f"  - {rule} ({why})")
               sys.exit(1)
-          print("evil-bypass: exit 3 (RED), all four bypass-class catches present OK")
+          print(f"evil-bypass: exit 3 (RED), all {len(required)} bypass-class catches present OK")
           PY
 
       - name: Self-audit smoke test (no crash)
