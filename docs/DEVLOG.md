@@ -13,7 +13,7 @@ docs → PR → squash-merge → GitHub release.
 | C | Bundled config / hooks / MCP | v1.1.0 | [#1](https://github.com/AntonioTimo/skillchecker/pull/1) | ✅ released |
 | A | Python AST pass | v1.2.0 | [#2](https://github.com/AntonioTimo/skillchecker/pull/2) | ✅ released |
 | B | Unicode / invisible characters | v1.3.0 | [#3](https://github.com/AntonioTimo/skillchecker/pull/3) | ✅ released |
-| D | Exfil / evasion breadth | v1.4.0 | [#4](https://github.com/AntonioTimo/skillchecker/pull/4) | 🚧 in review |
+| D | Exfil / evasion breadth | v1.4.0 | [#4](https://github.com/AntonioTimo/skillchecker/pull/4) | ✅ released |
 
 ---
 
