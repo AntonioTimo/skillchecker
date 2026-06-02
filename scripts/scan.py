@@ -196,6 +196,10 @@ CRITICAL_RULES = [
     ("CR037", r"\beval\b[^\n]*\$\(\s*(?:curl|wget|fetch)\b",
      "eval over a command-substituted remote fetch — runs unaudited remote code",
      "Refuse."),
+
+    ("CR038", r"\b(?:169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200)\b",
+     "Cloud instance-metadata endpoint — SSRF target for stealing IAM / cloud credentials",
+     "Refuse. A skill has no reason to query the cloud metadata service."),
 ]
 
 HIGH_RULES = [
@@ -270,6 +274,10 @@ HIGH_RULES = [
     ("HI021", r"api\.telegram\.org/bot",
      "Telegram bot API — usable as a covert exfiltration channel; legitimate only for a skill whose declared purpose is a Telegram bot",
      "Confirm the skill's stated purpose; otherwise treat as an exfil channel and refuse."),
+
+    ("HI022", r"https?://(?:[^/\s\"']*\.)?xn--",
+     "IDN / punycode host (xn--) — a homoglyph domain that can impersonate a trusted brand for phishing / C2",
+     "Decode the punycode and verify the real domain; a skill rarely needs an internationalized host."),
 ]
 
 MEDIUM_RULES = [
@@ -422,7 +430,13 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
             except re.error:
                 continue
 
-            if compiled.search(target):
+            # Also test an NFKC-normalized copy, so fullwidth / compatibility
+            # characters (e.g. fullwidth latin or math styles) can't hide a
+            # dangerous pattern. Escalate-only — normalization never suppresses.
+            norm = unicodedata.normalize("NFKC", target)
+            m_raw = compiled.search(target)
+            m_nfkc = compiled.search(norm) if (not m_raw and norm != target) else None
+            if m_raw or m_nfkc:
                 # Per-rule false-positive guards
                 if rule_id == "ME002":
                     if "mktemp" in line:
@@ -483,12 +497,15 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                         ):
                             continue
 
+                why_out = why
+                if m_nfkc and not m_raw:
+                    why_out = why + " — revealed by NFKC normalization (text uses fullwidth/compatibility characters)"
                 snippet = line.strip()
                 if len(snippet) > 200:
                     snippet = snippet[:197] + "..."
                 findings.append(Finding(
                     severity=severity, rule_id=rule_id, file=rel,
-                    line=i, snippet=snippet, why=why, suggested_fix=fix,
+                    line=i, snippet=snippet, why=why_out, suggested_fix=fix,
                 ))
 
     return findings
