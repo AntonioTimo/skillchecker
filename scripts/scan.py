@@ -16,13 +16,16 @@ It opens files for read only. No subprocess, no network, no writes.
 """
 
 import ast
+import ipaddress
 import json
 import os
 import re
+import shlex
 import sys
 import unicodedata
 from dataclasses import dataclass, asdict
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # Files we examine. Anything else is reported as "unaudited file"
 # and the Claude-side review treats binaries / blobs as a strong RED signal.
@@ -150,7 +153,7 @@ CRITICAL_RULES = [
      "Access to credential / secret files",
      "Refuse unless skill is explicitly a credential helper and this is documented."),
 
-    ("CR026", r"(?:webhook\.site|requestbin|pastebin\.com|paste\.rs|discord\.com/api/webhooks|hooks\.slack\.com|ngrok\.io|ngrok-free\.app|burpcollaborator|interactsh)",
+    ("CR026", r"(?i)(?:webhook\.site|requestbin|pastebin\.com|paste\.rs|discord\.com/api/webhooks|hooks\.slack\.com|ngrok\.io|ngrok-free\.app|burpcollaborator|interactsh)",
      "Known exfiltration endpoint — data leakage to attacker-controlled service",
      "Refuse."),
 
@@ -181,7 +184,7 @@ CRITICAL_RULES = [
      "Role confusion — skill asks the model to treat untrusted input as instructions",
      "Refuse. This is the prompt-injection vulnerability the skill should be defending against, not enabling."),
 
-    ("CR034", r"(?:trycloudflare\.com|\.loca\.lt|serveo\.net|lhr\.life|localhost\.run|\.oast\.(?:fun|live|site|pro|me)|pipedream\.net|beeceptor\.com|requestcatcher\.com|\.telebit\.(?:io|me)|tunnelto\.dev)",
+    ("CR034", r"(?i)(?:trycloudflare\.com|\.loca\.lt|serveo\.net|lhr\.life|localhost\.run|\.oast\.(?:fun|live|site|pro|me)|pipedream\.net|beeceptor\.com|requestcatcher\.com|\.telebit\.(?:io|me)|tunnelto\.dev)",
      "Tunneling / OOB-interaction service — points at an attacker-controlled box; data exfiltration channel",
      "Refuse unless the skill is explicitly and transparently a tunnel helper."),
 
@@ -196,6 +199,10 @@ CRITICAL_RULES = [
     ("CR037", r"\beval\b[^\n]*\$\(\s*(?:curl|wget|fetch)\b",
      "eval over a command-substituted remote fetch — runs unaudited remote code",
      "Refuse."),
+
+    ("CR038", r"(?i)\b(?:169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200)\b",
+     "Cloud instance-metadata endpoint — SSRF target for stealing IAM / cloud credentials",
+     "Refuse. A skill has no reason to query the cloud metadata service."),
 ]
 
 HIGH_RULES = [
@@ -259,17 +266,21 @@ HIGH_RULES = [
      "JavaScript dynamic code execution / base64 decode — common obfuscation pattern",
      "Refuse if used over non-literal input."),
 
-    ("HI019", r"https?://(?:\d{1,3}(?:\.\d{1,3}){3}|0x[0-9a-fA-F]{6,8}\b|\d{8,10}\b|\[[0-9A-Fa-f:]+\])",
-     "IP-literal or numeric-encoded IP in a URL — bypasses domain blocklists; a hardcoded public/encoded host is a common C2 / exfil pattern",
+    ("HI019", r"(?i)(?:https?|ftps?)://|\b(?:curl|wget|fetch|nc|ncat|netcat|telnet|ssh)\b",
+     "IP-literal or numeric-encoded IP host in a URL / network command — bypasses domain blocklists; a hardcoded public/encoded host is a common C2 / exfil pattern",
      "Verify the destination. A public IP literal or an encoded IP (hex/decimal) is suspicious; prefer a named, documented endpoint."),
 
     ("HI020", r"\$\{IFS\}|\$IFS\b",
      "${IFS} shell space-substitution — evasion used to slip spaces past naive command filters",
      "There is no legitimate reason to assemble commands with ${IFS} in a skill."),
 
-    ("HI021", r"api\.telegram\.org/bot",
+    ("HI021", r"(?i)api\.telegram\.org/bot",
      "Telegram bot API — usable as a covert exfiltration channel; legitimate only for a skill whose declared purpose is a Telegram bot",
      "Confirm the skill's stated purpose; otherwise treat as an exfil channel and refuse."),
+
+    ("HI022", r"(?i)\bxn--[a-z0-9]",
+     "IDN / punycode label (xn--) — a homoglyph domain that can impersonate a trusted brand for phishing / C2 (matches bare host / userinfo@ too, not just scheme://)",
+     "Decode the punycode and verify the real domain; a skill rarely needs an internationalized host."),
 ]
 
 MEDIUM_RULES = [
@@ -332,14 +343,223 @@ ALL_RULES = (
 )
 
 
-def scan_file(path: Path, root: Path) -> list[Finding]:
-    """Open a file and run every rule's regex against each line.
+_NET_CMDS = {"curl", "wget", "fetch", "nc", "ncat", "netcat", "telnet", "ssh"}
 
-    For .md files, only lines inside code-fence blocks (```...```) are scanned,
-    because that's the only place where executable instructions live. Inline-code
-    in prose (single backticks) is documentation — examples of patterns being
-    discussed, not patterns being executed. Without this, a skill that documents
-    its own threat model triggers itself.
+# Option grammar is COMMAND-AWARE: the same letter means different things per
+# tool (`curl -x` is a proxy host; `ssh -x` is boolean X11; `curl -O` is boolean
+# but `wget -O` takes an output file). For each net command we list:
+#   HOST opts — value is a network host / IP -> classify it;
+#   DATA opts — value is data / a file / a credential / a number -> skip it.
+# Every flag NOT listed is treated as boolean (consumes no following token), so a
+# boolean flag never swallows the scheme-less IP target after it. These are
+# curated allowlists, not exhaustive — an exotic option may be missed.
+_CURL_HOST = {
+    "-x", "--proxy", "--proxy1.0", "--preproxy",
+    "--socks4", "--socks4a", "--socks5", "--socks5-hostname",
+    "--url", "--resolve", "--connect-to", "--dns-servers",
+}
+_CURL_DATA = {
+    "-X", "--request",  # HTTP method token — not a host (a literal `-X 8.8.8.8`)
+    "-o", "--output", "-T", "--upload-file",
+    "-H", "--header", "-d", "--data", "--data-ascii", "--data-binary",
+    "--data-raw", "--data-urlencode", "-F", "--form", "--form-string",
+    "-A", "--user-agent", "-e", "--referer", "-b", "--cookie",
+    "-c", "--cookie-jar", "-u", "--user", "-U", "--proxy-user",
+    "-w", "--write-out", "-K", "--config", "-E", "--cert", "--cacert",
+    "--key", "--capath", "--interface", "-r", "--range",
+    "--trace", "--trace-ascii", "--stderr",
+}
+_WGET_DATA = {
+    "-O", "--output-document", "-o", "--output-file", "-a", "--append-output",
+    "--post-file", "--post-data", "--body-file", "--header",
+    "--user", "--password", "--http-user", "--http-password", "-P",
+    "--directory-prefix", "--load-cookies", "--save-cookies",
+    "--ca-certificate", "--certificate", "--private-key", "--referer",
+    "-U", "--user-agent", "--limit-rate", "-t", "--tries", "-T", "--timeout",
+    "--bind-address", "-e", "--execute",
+}
+_SSH_HOST = {"-J", "-W"}  # jump host / stdio-forward destination
+_SSH_DATA = {
+    "-i", "-l", "-p", "-o", "-F", "-E", "-c", "-m", "-b",
+    "-D", "-L", "-R", "-w", "-S", "-Q", "-B", "-e",
+}
+_NC_HOST = {"-x", "--proxy"}
+_NC_DATA = {
+    "-p", "-s", "-w", "-X", "-b", "-I", "-O", "-q", "-T", "-G", "-i",
+    "--source", "--source-port", "--proxy-type",
+}
+# net command -> (host-value options, data/file-value options)
+_CMD_OPTS = {
+    "curl": (_CURL_HOST, _CURL_DATA),
+    "fetch": (_CURL_HOST, _CURL_DATA),
+    "wget": (frozenset(), _WGET_DATA),
+    "ssh": (_SSH_HOST, _SSH_DATA),
+    "nc": (_NC_HOST, _NC_DATA),
+    "ncat": (_NC_HOST, _NC_DATA),
+    "netcat": (_NC_HOST, _NC_DATA),
+    "telnet": (frozenset(), frozenset()),
+}
+
+
+def _ip_publicness(host):
+    """'public' / 'private' / None — classify a host token as an IP literal.
+
+    A plain literal (dotted IPv4 or IPv6) is classified with the stdlib
+    `ipaddress` module, so RFC1918 / loopback / link-local / reserved read as
+    'private' and a hardcoded local-dev host does not false-positive. No
+    hand-rolled octet ranges (the regex host-extractor never converged).
+
+    A HEX or DECIMAL-encoded IPv4 (`0x7f000001`, `2130706433`) is reported as
+    'public' regardless of the address it decodes to: writing an IP in encoded
+    form is itself the evasion signal, so an encoded *loopback* must still flag
+    (a plainly-written `127.0.0.1` is fine; obfuscating it is not)."""
+    h = (host or "").strip().strip("[]")
+    if not h:
+        return None
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        # Not a plain literal — try hex / decimal IPv4 encoding.
+        n = None
+        if re.fullmatch(r"0[xX][0-9a-fA-F]+", h):
+            n = int(h, 16)
+        elif re.fullmatch(r"\d{8,10}", h):
+            n = int(h)
+        if n is not None and n <= 0xFFFFFFFF:
+            try:
+                ipaddress.ip_address(n)  # validate it is a real address
+            except ValueError:
+                return None
+            return "public"  # encoded form — always flag, value notwithstanding
+        return None
+    if (ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_unspecified or ip.is_multicast):
+        return "private"
+    return "public"
+
+
+def _hosts_from_token(tok):
+    """Every host / IP candidate inside one positional token or option value.
+    Handles scheme URLs, `userinfo@`, `host:port`, bracketed IPv6 (with optional
+    `:port`), and the colon/comma-joined option formats of `--resolve`
+    (host:port:addr[,addr]), `--connect-to` (h1:p1:h2:p2) and `--dns-servers`
+    (a,b) — where the real destination is an inner field."""
+    if not tok:
+        return []
+    if "://" in tok:
+        try:
+            hn = urlsplit(tok).hostname
+        except ValueError:
+            hn = None
+        return [hn] if hn else []
+    v = tok.split("/", 1)[0]          # drop any /path
+    if "@" in v:
+        v = v.rsplit("@", 1)[1]       # drop userinfo
+    out = []
+    m = re.match(r"^\[([0-9A-Fa-f:]+)\](?::\d+)?$", v)
+    if m:                            # bracketed IPv6, optional :port -> [2001:db8::1]:443
+        out.append(m.group(1))
+    elif v.count(":") == 1:          # host:port (single colon, not IPv6) -> strip port
+        out.append(v.rsplit(":", 1)[0])
+    else:
+        out.append(v.strip("[]"))
+    if "," in v or v.count(":") >= 2:
+        # comma / multi-colon option value: --dns-servers a,b ; --resolve
+        # host:port:addr ; --connect-to h1:p1:h2:p2 — scan each field for an IP.
+        out.extend(f.strip("[]") for f in re.split(r"[:,]", v))
+    return [h for h in out if h]
+
+
+def _split_opt(tok):
+    """(name, attached_value_or_None) for an option token — covers `--name`,
+    `--name=value`, and the attached short form `-xvalue` (e.g. `-x8.8.8.8:8080`,
+    which curl accepts). A bare flag returns (token, None)."""
+    if tok.startswith("--"):
+        name, eq, val = tok.partition("=")
+        return name, (val if eq else None)
+    if len(tok) > 2:                  # -xVALUE  (short option, value attached)
+        return tok[:2], tok[2:]
+    return tok, None
+
+
+def _candidate_hosts(text):
+    """Hosts referenced in a line.
+
+    Two passes: (1) every `scheme://…` URL anywhere in the raw text, parsed with
+    `urlsplit` (handles userinfo / port / IPv6 / multiple-@); (2) scheme-less
+    hosts in network commands. The second pass walks each shell command segment
+    independently — split on `;` `|` `&&` `||` `&` so one command's reach does
+    not leak past a separator — and within a segment distinguishes a host-bearing
+    option value (`--proxy`/`--url`/`--resolve`/…, classified) from a data/file
+    flag value (`-H`/`-o`/`-d`, skipped) from a boolean flag (`-s`/`-L`/`--fail`,
+    which does not consume the IP target that follows it) from a positional
+    request target. The option grammar is per-command (`_CMD_OPTS`), since the
+    same letter differs by tool — `wget -O` is an output file, `ssh -i` an
+    identity file, `ssh -x` boolean, while `curl -x` is a proxy host."""
+    hosts = []
+    for m in re.finditer(r"(?i)\b(?:https?|ftps?)://[^\s\"'<>)\]]+", text):
+        try:
+            hn = urlsplit(m.group(0)).hostname
+        except ValueError:
+            hn = None
+        if hn:
+            hosts.append(hn)
+    for segment in re.split(r"(?:&&|\|\||[;|&])", text):
+        try:
+            toks = shlex.split(segment, posix=True)
+        except ValueError:
+            toks = segment.split()
+        active = False
+        host_opts = data_opts = frozenset()  # option grammar of the active command
+        want_host_value = False  # next token is a host (after --proxy / --url / …)
+        skip_value = False       # next token is a data/file flag's value (-H / -o / …)
+        for t in toks:
+            base = t.lower().rsplit("/", 1)[-1]
+            if base in _NET_CMDS:
+                active = True
+                host_opts, data_opts = _CMD_OPTS.get(base, (frozenset(), frozenset()))
+                want_host_value = skip_value = False
+                continue
+            if not active:
+                continue
+            if want_host_value:
+                hosts.extend(_hosts_from_token(t))
+                want_host_value = False
+                continue
+            if skip_value:
+                skip_value = False
+                continue
+            if t.startswith("-"):
+                name, attached = _split_opt(t)
+                if name in host_opts:
+                    if attached is not None:   # --proxy=host / -xhost
+                        hosts.extend(_hosts_from_token(attached))
+                    else:                      # --proxy host  (value is next token)
+                        want_host_value = True
+                elif name in data_opts and attached is None:
+                    skip_value = True          # -o file  (value is next token)
+                # boolean / unknown flag, or attached data value: do not skip;
+                # the following token is classified as the positional target.
+                continue
+            hosts.extend(_hosts_from_token(t))  # positional request target
+    return hosts
+
+
+def _public_ip_in(text):
+    """True if the line references a public IP-literal host (URL or command target)."""
+    return any(_ip_publicness(h) == "public" for h in _candidate_hosts(text))
+
+
+def scan_file(path: Path, root: Path) -> list[Finding]:
+    """Open a file and run every rule against each line.
+
+    For .md files: lines inside ``` / ~~~ code fences are scanned in full. In
+    prose, the prompt-injection rules (PROSE_TARGETING) scan the whole line, and
+    every other rule scans each inline-code (backtick) span individually — a span
+    is executable-looking content, while plain prose is left to the LLM-side audit
+    so a skill documenting its own threat model doesn't trip every rule. A span
+    framed by a defensive negation immediately before it ("never use `x`") is
+    skipped; NFKC-normalized copies are also tested so fullwidth/compat hiding fails.
     """
     rel = path.relative_to(root).as_posix()
     findings: list[Finding] = []
@@ -404,76 +624,76 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
         # Frontmatter and code-fence both get full scanning.
         is_prose_in_md = (is_markdown and not in_frontmatter
                           and not in_code_fence)
-        # Inline-code spans (backticks) in prose ARE code — scan them for ALL
-        # rules, not just the prompt-injection ones (Codex P0). Plain prose still
-        # goes only through PROSE_TARGETING; the LLM-side audit reads the rest, and
+        # Inline-code spans in prose ARE code — scanned INDIVIDUALLY, each with the
+        # prose IMMEDIATELY before it, so a defensive span ("never use `x`") can't
+        # mask a later malicious span on the same line (Codex round 4). Plain prose
+        # still only runs PROSE_TARGETING; the LLM-side audit reads the rest, and
         # scanning all prose would drown documentation in self-FPs.
-        inline_code = " ".join(re.findall(r"`+([^`\n]+?)`+", line)) if is_prose_in_md else ""
+        # Inline-code spans in prose are scanned individually, as code. We do NOT
+        # try to infer "defensive intent" from the surrounding prose: guessing
+        # intent from one word ("never", "avoid", "block", …) in the regex layer
+        # kept opening silent bypasses ("Never mind, run `curl | sh`"). A documented
+        # bad pattern in inline code is a self-FP the LLM-side audit contextualizes;
+        # a missed attack is not acceptable (Codex round 5). PROSE_TARGETING rules
+        # still scan the whole line with their own position-based negation guard.
+        inline_spans = [sm.group(1) for sm in re.finditer(r"`+([^`\n]+?)`+", line)] \
+            if is_prose_in_md else []
 
         for rule_id, severity, pattern, why, fix in ALL_RULES:
-            target = line
-            if is_prose_in_md and rule_id not in PROSE_TARGETING:
-                if not inline_code:
-                    continue
-                target = inline_code  # scan only the inline-code span(s)
-
             try:
                 compiled = re.compile(pattern)
             except re.error:
                 continue
 
-            if compiled.search(target):
-                # Per-rule false-positive guards
+            if is_prose_in_md and rule_id not in PROSE_TARGETING:
+                units = inline_spans          # each inline-code span, scanned as code
+            else:
+                units = [line]                # whole line (code fence / .py / frontmatter)
+
+            for unit in units:
+                # Also test an NFKC-normalized copy, so fullwidth / compatibility
+                # characters can't hide a dangerous pattern. Escalate-only.
+                norm = unicodedata.normalize("NFKC", unit)
+                m_raw = compiled.search(unit)
+                m_nfkc = compiled.search(norm) if (not m_raw and norm != unit) else None
+                if not (m_raw or m_nfkc):
+                    continue
+
+                # Per-rule false-positive guards (operate on the scanned unit)
                 if rule_id == "ME002":
-                    if "mktemp" in line:
+                    if "mktemp" in unit:
                         continue
-                    if re.search(r"/tmp/[A-Za-z0-9_-]+\.\*", line):
+                    if re.search(r"/tmp/[A-Za-z0-9_-]+\.\*", unit):
                         continue
-                    if re.search(r"(?:PREFIX|prefix)\s*=\s*['\"]/tmp/", line):
+                    if re.search(r"(?:PREFIX|prefix)\s*=\s*['\"]/tmp/", unit):
                         continue
                 if rule_id == "ME004":
-                    if line.rstrip().endswith((",", "(", "\\")):
+                    if unit.rstrip().endswith((",", "(", "\\")):
                         continue
                 if rule_id == "ME006":
-                    # If description uses YAML folded/literal scalar
-                    # (description: >-, description: |, description: >),
-                    # the actual content is on the following lines and
-                    # ME006's single-line length check doesn't apply.
-                    if re.search(r"^description:\s*[>|][-+]?\s*$", line):
+                    # YAML folded/literal scalar: the value continues on later lines.
+                    if re.search(r"^description:\s*[>|][-+]?\s*$", unit):
                         continue
                 if rule_id == "HI019":
-                    # Skip loopback / private / link-local dotted-quad IPs (local
-                    # dev URLs like http://127.0.0.1:8080). Encoded forms
-                    # (0x.../decimal/IPv6) are never skipped.
-                    m = re.search(r"https?://(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}", line)
-                    if m:
-                        a, b = int(m.group(1)), int(m.group(2))
-                        if (a in (0, 10, 127, 255)
-                                or (a == 192 and b == 168)
-                                or (a == 172 and 16 <= b <= 31)
-                                or (a == 169 and b == 254)):
-                            continue
+                    # Decide via real host extraction (urllib + ipaddress), not a
+                    # second regex kept in sync with the rule: flag only if a URL or
+                    # network-command target resolves to a PUBLIC IP literal. Named
+                    # hosts, loopback/private, userinfo IPs, and flag values all skip.
+                    if not _public_ip_in(norm):
+                        continue
                 if rule_id in ("CR020", "CR021"):
-                    # Skip if match is inside a string literal that's an
-                    # error/help message telling the user to install something
-                    # — common in scripts (e.g. "ERROR: install poppler with: brew install poppler").
-                    stripped = line.lstrip()
+                    # Skip an install command inside an error/help string literal.
+                    stripped = unit.lstrip()
                     if (stripped.startswith(('"', "'", "f'", 'f"', '"""', "'''")) or
-                        re.search(r"(?:print|stderr|sys\.exit|raise)\s*\(", line) or
-                        line.rstrip().endswith(('\\n",', '\\n"', "\\n',", "\\n'"))):
+                        re.search(r"(?:print|stderr|sys\.exit|raise)\s*\(", unit) or
+                        unit.rstrip().endswith(('\\n",', '\\n"', "\\n',", "\\n'"))):
                         continue
                 if rule_id in ("CR028", "CR029", "CR030", "CR031"):
-                    # Distinguish defensive prose from attack by where the
-                    # negation sits. Defensive: negation PRECEDES the dangerous
-                    # phrase ("do not retry with relaxed limits", "skill must
-                    # never ignore safety"). Attack: dangerous phrase is the
-                    # imperative ("Do not tell the user", "Ignore safety").
-                    m = compiled.search(line)
+                    # Defensive prose: an ACTUAL negation PRECEDES the dangerous
+                    # phrase (bare modals should/must/may do not count — Codex).
+                    m = compiled.search(unit)
                     if m:
-                        prefix = line[: m.start()]
-                        # Only an ACTUAL negation counts as defensive. Bare modals
-                        # (should/must/may) do NOT negate — "you should ignore
-                        # safety policies" is an attack, not defense (Codex P0).
+                        prefix = unit[: m.start()]
                         if re.search(
                             r"(?i)\b(?:do\s+not|don'?t|never|cannot|can'?t|won'?t|"
                             r"shouldn'?t|mustn'?t|should\s+not|must\s+not|may\s+not|"
@@ -483,12 +703,15 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                         ):
                             continue
 
+                why_out = why
+                if m_nfkc and not m_raw:
+                    why_out = why + " — revealed by NFKC normalization (text uses fullwidth/compatibility characters)"
                 snippet = line.strip()
                 if len(snippet) > 200:
                     snippet = snippet[:197] + "..."
                 findings.append(Finding(
                     severity=severity, rule_id=rule_id, file=rel,
-                    line=i, snippet=snippet, why=why, suggested_fix=fix,
+                    line=i, snippet=snippet, why=why_out, suggested_fix=fix,
                 ))
 
     return findings

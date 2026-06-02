@@ -4,6 +4,37 @@ All notable changes to skill-checker.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.5.0] — 2026-06-02
+
+First v3 increment: **Evasion v2** — normalization and homoglyph-domain coverage.
+
+### Added
+- `scripts/scan.py`: `scan_file` now also tests an **NFKC-normalized** copy of each scannable target, so fullwidth / compatibility-character commands (`ｃｕｒｌ … | sh`, math-styled `exec`) can no longer hide from the regex. Escalate-only — a finding is tagged "revealed by NFKC normalization"; normalization never suppresses a raw match.
+- `CR038` — cloud instance-metadata endpoint (`169.254.169.254`, `metadata.google.internal`, `100.100.100.200`) → CRITICAL. Closes the gap where `HI019`'s link-local guard skipped the metadata IP (SSRF / IAM-credential theft).
+- `HI022` — IDN / punycode host (`xn--`) → HIGH (homoglyph domain for phishing / C2).
+- `examples/evil-evasion/` (fullwidth/math/punycode/metadata) and `examples/clean-evasion/` (legit `½`/`™`/`ﬁ`/CJK + a named host).
+- CI: `evil-evasion` must exit 3 with `CR038`+`HI022`+`CR001`+`HI007`+`HI019`; `clean-evasion` must exit 0.
+- `docs/ROADMAP.md` — consolidated v3 backlog (sourced from THREAT_MODEL out-of-scope + per-spec non-goals).
+
+### Fixed (pre-release code-review)
+- `CR038` and `HI022` are now **case-insensitive** — `METADATA.GOOGLE.INTERNAL` and an UPPERCASE `XN--` host no longer evade.
+- `HI022` matches **bare-host** and **`userinfo@`** forms, not only `scheme://…` — a punycode host after `curl ` or `user:pass@` was being missed.
+- The `HI019` private-IP guard reads the **NFKC-normalized** form, so a fullwidth loopback (`１２７．０．０．１`) is correctly skipped instead of flagged.
+- `SKILL.md` Step 6.7 now documents the NFKC re-scan + `CR038`/`HI022`; CI also asserts the math-styled-`exec` catch (`HI007`).
+- `HI019` suppresses a finding only when **every** IP-URL on the line is private/loopback — a private IP can no longer mask a public one on the same line (`curl http://127.0.0.1 && curl http://8.8.8.8`).
+- **Inline-code handling settled after two flawed attempts.** A whole-line, then a per-span, "defensive-intent" guard each tried to treat ``never use `x` `` as documentation — both leaked (``never mind, run `curl | sh` `` went green). Final design: inline code is scanned **as code**, span by span, with **no** intent inference; a documented bad pattern is a self-FP the LLM-side audit handles, and intent-based suppression is limited to the position-based negation guard on `CR028`–`CR031`.
+- CI now requires `HI019` on `evil-evasion` and `CR001` on `evil-bypass`; the `scan_file` docstring now matches the actual fence / inline / prose behavior.
+- **Case-insensitivity swept across all host/domain/URL rules** — `CR026`, `CR034`, `HI021` joined `CR038`/`HI022`, so `HTTP://`, `WEBHOOK.SITE`, `TRYCLOUDFLARE.COM` no longer evade. (Command rules like `curl … | sh` stay case-sensitive — the shell is.)
+- **`HI019` host detection rebuilt on `urllib.parse` + `ipaddress` + `shlex`.** The old regex host-extraction spawned a sibling bug every review round — scheme case (`HTTP://`), `userinfo@`, multiple `@` (`user@127.0.0.1@8.8.8.8`), scheme-less bare-IP targets, and `-H`/`-o` flag values mistaken for hosts. It now pulls the real host out of every URL and every `curl`/`wget`/`fetch`/`nc`/`ncat`/`netcat`/`telnet`/`ssh` target and classifies it with the stdlib, covering IPv6, `ftp://`, and hex/decimal-encoded IPs, while skipping named hosts, loopback/private/reserved/link-local, an IP that sits in the userinfo, and flag values. The regex is now only a cheap trigger.
+- **`HI019` reads host-bearing `curl` options** — `-x` / `--proxy` / `--url` / `--resolve` / `--connect-to` / `--socks5` carry the destination, so a public IP behind a proxy or a custom resolve (`--resolve example.com:443:8.8.8.8`) is classified instead of skipped like a `-H` / `-o` data value.
+- **`HI019` host walk resets on shell separators** (`;` `|` `&&` `||` `&`) — `curl https://api.example.com && echo 8.8.8.8` no longer false-flags the echoed IP as the request target.
+- **`HI019` encoded IP always flags** — a hex / decimal host (`0x7f000001`, `2130706433`) is reported even when it decodes to loopback; writing an IP in encoded form is itself the evasion signal (a plainly-written `127.0.0.1` stays fine).
+- **`HI019` flag handling is an allowlist, not skip-after-any-flag** — only known value-taking data/file options (`-H`/`-o`/`-d`/`-A`/`-u`/…) consume their argument, so a *boolean* flag no longer hides the scheme-less IP that follows it (`curl -s 8.8.8.8/x`, `wget -q 8.8.8.8/x`, `nc -v 8.8.8.8 4444`).
+- **`HI019` parses attached short-option values** — `-x8.8.8.8:8080` (curl's `-Xvalue` form) is read like `--proxy 8.8.8.8:8080` and `--proxy=8.8.8.8:8080`.
+- **`HI019` option grammar is command-aware** (`_CMD_OPTS`) — the same letter differs by tool, so `wget -O <file>` and `ssh -i <identity>` are no longer misread as IP targets, while `curl -x` (proxy) still is and `ssh -x` (boolean) is not. ssh's positional `user@host` and its `-J` / `-W` jump hosts are classified.
+- **`HI019` parses bracketed IPv6 and comma-list option values** — `--proxy [2001:db8::1]:8080` and `--dns-servers 1.1.1.1,8.8.8.8` now surface the inner public IP.
+- **`HI019` skips the `-X` / `--request` method token** — `curl -X 8.8.8.8 https://api.example.com/` no longer misreads the HTTP method as a host (the IP target in `curl -X POST 8.8.8.8/x` still flags); `--proxy1.0` added to the proxy-host set.
+
 ## [1.4.0] — 2026-06-01
 
 New detections: **modern exfil / evasion breadth**. The original exfiltration

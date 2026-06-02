@@ -212,6 +212,7 @@ skill-checker/
 │   ├── evil-ast/ + clean-ast/            ← obfuscated calls / safe Python
 │   ├── evil-unicode/ + clean-unicode/    ← hidden-Unicode injection / bilingual prose
 │   ├── evil-exfil/ + clean-exfil/        ← modern exfil / local-dev URLs
+│   ├── evil-evasion/ + clean-evasion/    ← NFKC / homoglyph / metadata-SSRF / scheme-less IP vs. legit compat + named hosts
 │   └── evil-bypass/                      ← regression set for previously-evaded patterns
 └── docs/
     └── HOWTO.md          ← user-facing guide

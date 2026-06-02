@@ -14,6 +14,7 @@ docs → PR → squash-merge → GitHub release.
 | A | Python AST pass | v1.2.0 | [#2](https://github.com/AntonioTimo/skillchecker/pull/2) | ✅ released |
 | B | Unicode / invisible characters | v1.3.0 | [#3](https://github.com/AntonioTimo/skillchecker/pull/3) | ✅ released |
 | D | Exfil / evasion breadth | v1.4.0 | [#4](https://github.com/AntonioTimo/skillchecker/pull/4) | ✅ released |
+| E | Evasion v2 (normalization + homoglyph domains) | v1.5.0 | — | 🚧 in review |
 
 ---
 
@@ -129,3 +130,55 @@ merge, each regression-tested by `examples/evil-bypass/` and broader CI asserts:
 
 Lesson logged: a security tool's worst failure is the **false negative** (a silent
 bypass that reads as 🟢). The review caught four of them before they shipped.
+
+---
+
+## Phase E — Evasion v2 (v1.5.0, in review) · first v3 increment
+
+**Goal.** Close evasion that survives v2: Unicode-normalization tricks and homoglyph domains.
+
+**The gap (RED).** `examples/evil-evasion/` hid `curl … | sh` in **fullwidth**
+glyphs, `exec` in **math-styled** glyphs, an `xn--` punycode host, and the cloud
+metadata IP `169.254.169.254` (which `HI019`'s link-local guard skipped). The
+pre-1.5.0 scanner scored it 🟢 GREEN.
+
+**The fix (GREEN).** `scan_file` now also scans an **NFKC-normalized** copy of each
+target — escalate-only, so fullwidth/compat commands surface while legit `½`/`™`/CJK
+do not. `CR038` cloud-metadata SSRF; `HI022` IDN/punycode host.
+
+**Verified.** evil-evasion GREEN→RED (CR001/HI007 via NFKC, CR038, HI022);
+clean-evasion GREEN; no regressions across the 13 fixtures.
+
+**Then the code-review rounds.** An external Codex pass hammered the branch and
+kept finding the same *shape* of bug in two subsystems:
+
+- *Host-form detection (`HI019`).* Round after round surfaced a new sibling —
+  scheme case (`HTTP://`), `userinfo@`, multiple `@`, scheme-less bare-IP
+  targets, `-H`/`-o` flag values read as hosts, then `nc`/`telnet`/`ssh`/`ftp`
+  gaps. Patching one regex spawned the next. Converged by **rebuilding host
+  extraction on `urllib.parse` + `ipaddress` + `shlex`** and demoting the regex
+  to a cheap trigger — IPv6, `ftp://`, and hex/decimal IPs fall out of the
+  stdlib for free, and the `-H`/`-o` false positives vanish. The rebuild itself
+  drew several more rounds — an encoded loopback must still flag (the *encoding*
+  is the signal, not the decoded value); host-bearing options (`--proxy`/
+  `--resolve`/`--connect-to`, including the attached `-x8.8.8.8` form) carry the
+  destination and must be read, not skipped like data flags; data-flag skipping
+  had to become an explicit *allowlist* so a boolean flag (`-s`/`-L`/`--fail`)
+  stops swallowing the IP target after it; the command walk must reset on shell
+  separators so `curl url && echo IP` doesn't misread the echoed IP; and the
+  option grammar had to go *command-aware*, because `wget -O` is a file where
+  `curl -O` is a flag and `ssh -x` is boolean where `curl -x` is a proxy. The
+  parser is small but it *is* a parser — per-command option arity (down to
+  `-X`/`--request` carrying an HTTP method, not a host), bracketed IPv6,
+  comma-list option values and all.
+- *Inline-code intent.* A whole-line, then a per-span, "defensive-intent" guard
+  each tried to read ``never use `x` `` as documentation; both leaked. Dropped
+  entirely — inline code is scanned as code, suppression left to the narrow
+  position-based negation guards on `CR028`–`CR031`.
+
+The doubled lesson: **when a regex subsystem keeps spawning siblings, replace it
+structurally** — don't patch the Nth instance, and don't infer intent in the
+regex layer.
+
+`docs/ROADMAP.md` lays out the rest of the v3 backlog (taint/data-flow, JS AST,
+supply-chain, …).

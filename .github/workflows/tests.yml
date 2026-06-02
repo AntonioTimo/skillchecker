@@ -252,16 +252,66 @@ jobs:
           python3 <<'PY'
           import json, sys
           data = json.load(open("/tmp/out.json"))
-          rules = {f["rule_id"] for f in data["findings"]}
-          required = {"FM005": "yaml-list Bash(* *)", "CR026": "~~~/inline exfil", "CR029": "bare-modal policy override", "CR036": "process-substitution pipe-to-shell", "CR037": "eval-substitution pipe-to-shell"}
+          findings = data["findings"]
+          rules = {f["rule_id"] for f in findings}
+          required = {"FM005": "yaml-list Bash(* *)", "CR026": "~~~/inline exfil", "CR029": "bare-modal policy override", "CR036": "process-substitution pipe-to-shell", "CR037": "eval-substitution pipe-to-shell", "CR001": "defensive span must not mask a malicious span"}
           missing = [(k, v) for k, v in required.items() if k not in rules]
+          # Lock the SAME-LINE case: a negation word ("never mind") used
+          # non-defensively on the same line as a malicious span must still fire.
+          cr001 = "\n".join(f["snippet"] for f in findings if f["rule_id"] == "CR001").lower()
+          if "never mind" not in cr001:
+              missing.append(("CR001", "same-line non-defensive negation must still flag [snippet]"))
           if missing:
               print("::error::evil-bypass missing expected catches:")
               for rule, why in missing:
                   print(f"  - {rule} ({why})")
               sys.exit(1)
-          print(f"evil-bypass: exit 3 (RED), all {len(required)} bypass-class catches present OK")
+          print(f"evil-bypass: exit 3 (RED), all {len(required)} catches + same-line case present OK")
           PY
+
+      - name: evil-evasion must exit 3 (RED) with CR038 + HI022
+        run: |
+          set +e
+          python3 scripts/scan.py examples/evil-evasion/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 3 ]; then
+            echo "::error::evil-evasion should exit 3 (RED), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          python3 <<'PY'
+          import json, sys
+          data = json.load(open("/tmp/out.json"))
+          findings = data["findings"]
+          rules = {f["rule_id"] for f in findings}
+          required = {"CR038": "cloud-metadata SSRF", "HI022": "IDN/punycode host", "CR001": "fullwidth pipe-to-shell via NFKC", "HI007": "math-styled exec via NFKC", "HI019": "private-masks-public / userinfo IP"}
+          missing = [(k, v) for k, v in required.items() if k not in rules]
+          # Lock specific HI019 variants by snippet — one variant breaking silently
+          # while another still fires must not keep CI green.
+          hi019 = "\n".join(f["snippet"] for f in findings if f["rule_id"] == "HI019")
+          variants = {"HTTP://": "uppercase scheme", "127.0.0.1@8.8.8.8": "multiple-@ real host", "0x08080808": "bare-IP curl target (scheme-less)", "nc 8.8.8.8": "nc target via urllib/ipaddress", "--proxy 8.8.8.8": "host-bearing option value", "--resolve example.com:443:8.8.8.8": "multi-field option (resolve) inner IP", "-sL 8.8.8.8": "boolean flag must not swallow the IP target", "-x8.8.8.8": "attached short host option (-xVALUE)", "[2001:4860:4860::8888]": "bracketed IPv6 in proxy option", "--dns-servers 1.1.1.1,8.8.8.8": "comma-list option value", "root@8.8.8.8": "ssh public-IP host (identity file skipped, host still flags)", "-X POST 8.8.8.8": "method token skipped, IP target still flags"}
+          missing += [(k, v + " [HI019 variant snippet]") for k, v in variants.items() if k not in hi019]
+          if missing:
+              print("::error::evil-evasion missing expected catches:")
+              for rule, why in missing:
+                  print(f"  - {rule} ({why})")
+              sys.exit(1)
+          print("evil-evasion: exit 3 (RED), CR038+HI022+NFKC + HI019 variants present OK")
+          PY
+
+      - name: clean-evasion must exit 0 (GREEN)
+        run: |
+          set +e
+          python3 scripts/scan.py examples/clean-evasion/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::clean-evasion should exit 0 (GREEN), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          echo "::notice::clean-evasion: exit 0 (GREEN) ✓"
 
       - name: Self-audit smoke test (no crash)
         run: |
