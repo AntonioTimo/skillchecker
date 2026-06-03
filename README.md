@@ -156,8 +156,11 @@ This checker does not catch every threat class. It catches the common ones, fast
 1. **No dynamic analysis.** A skill that fetches malicious code at runtime
    from a server it controls passes static checks. Mitigation: 🔴 any skill
    with both network calls and writeable filesystem operations.
-2. **No supply-chain analysis.** A malicious update to a third-party Python
-   library it imports won't be detected. Pin and audit dependencies separately.
+2. **Partial supply-chain analysis.** Bundled dependency manifests are scanned
+   (`CR039` npm install-lifecycle scripts, `HI023` non-registry sources, `ME012`
+   unpinned deps), but a malicious *update* to an already-pinned registry library,
+   a transitive dependency, and CVE/version reputation are not detected. Pin and
+   audit dependencies separately (`pip-audit` / `npm audit`).
 3. **LLM judgment is fallible.** Adversarial code can mimic benign code.
    When the static scan flags multiple HIGH findings, even if individually
    explainable, treat it as a pattern.

@@ -1,0 +1,6 @@
+{
+  "module": "auth",
+  "description": "internal module dependency graph — a DATA file, not a manifest",
+  "dependencies": ["users", "tokens", "audit-log"],
+  "scripts": ["render", "export"]
+}

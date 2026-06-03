@@ -156,6 +156,37 @@ the verdict is 🔴 RED no matter how clean everything else looks.
 
 ---
 
+## Step 1.6 — Supply-chain audit (bundled dependency manifests)
+
+A bundled dependency manifest (`package.json`, `requirements.txt`,
+`pyproject.toml`, a lockfile, …) is a **declaration**, not a command — so the
+line rules (Step 2), which need a runtime install *verb* (`CR021`) or a public-IP
+literal (`HI019`), never see its dangerous forms. `scan.py` inspects them
+structurally (`check_supply_chain`), keyed off manifest **filenames** (so a
+`references/*.json` data file with a `dependencies` key, and prose, stay GREEN),
+parsing stdlib-only and **never executing** the file:
+
+| Rule | Finding | Severity |
+|---|---|---|
+| `CR039` | install-lifecycle script (`preinstall`/`postinstall`/`prepare`/…) in a bundled `package.json` | CRITICAL → RED |
+| `HI023` | dependency from a non-registry source (VCS / URL / tarball / non-TLS / index-redirect / poisoned lockfile `resolved`) | HIGH |
+| `ME012` | unpinned dep — open forms only (`*` / `latest` / bare name / unbounded `>=`), one finding per manifest | MEDIUM |
+
+**LLM-side judgment:** `CR039` is presence-based — a skill is never an
+`npm install`-ed package, so an install script is gratuitous; refuse, like a
+bundled hook (`CR032`). `HI023` may be a legitimate fork/monorepo pin, but a
+git/URL/tarball source bypasses the registry's signing — recommend pinning to a
+registry release, or vendoring and auditing the source. `ME012` is a hygiene
+nudge: pin to an exact version or lock with `--hash`. Registry sources
+(`pypi.org`, `registry.npmjs.org`, …), local deps (`workspace:`, `file:../`), and
+bounded caret/tilde ranges are **not** flagged.
+
+**Scope:** the *direct* manifest only — transitive deps, a malicious update to an
+already-pinned registry library, and CVE/version reputation are out of scope (see
+Limitations §2); audit those with `pip-audit` / `npm audit`.
+
+---
+
 ## Step 2 — Static scan
 
 Run the scanner. It's a regex-based first pass — fast, catches obvious patterns, never executes the skill being audited.
@@ -523,7 +554,7 @@ echo "✅ <skill-name> installed"
 ## Limitations — Read these out loud at every verdict
 
 1. **No dynamic analysis.** This checker reads code statically. A skill that fetches malicious code at runtime from a server it controls can pass static checks. Mitigation: 🔴 any skill with network calls + writeable filesystem operations.
-2. **No supply-chain analysis.** If the skill imports a third-party library with a CVE or a malicious update, this checker won't detect it. Keep dependencies pinned and audited separately.
+2. **Partial supply-chain analysis (Phase F).** `check_supply_chain` (Step 1.6) flags a bundled manifest that ships an install-lifecycle script (`CR039`), a non-registry source (`HI023`), or an unpinned dep (`ME012`) — the *direct* manifest only. It does **not** see a malicious update to an already-pinned registry library, a transitive dependency, a CVE, version reputation, or a typosquatted name. Keep dependencies pinned and audited separately (`pip-audit` / `npm audit`).
 3. **LLM judgment is fallible.** Adversarial code can mimic benign code. When the static scan shows multiple HIGH findings even if individually explainable, treat it as a pattern.
 4. **Update means re-audit.** A skill that was 🟢 yesterday may be 🔴 today. Always re-check after upstream updates.
 5. **Self-audit is a known edge case.** If a user runs `/skill-checker` against the skill-checker itself, expect 30+ CRITICAL/HIGH findings in:

@@ -14,7 +14,8 @@ docs → PR → squash-merge → GitHub release.
 | A | Python AST pass | v1.2.0 | [#2](https://github.com/AntonioTimo/skillchecker/pull/2) | ✅ released |
 | B | Unicode / invisible characters | v1.3.0 | [#3](https://github.com/AntonioTimo/skillchecker/pull/3) | ✅ released |
 | D | Exfil / evasion breadth | v1.4.0 | [#4](https://github.com/AntonioTimo/skillchecker/pull/4) | ✅ released |
-| E | Evasion v2 (normalization + homoglyph domains) | v1.5.0 | — | 🚧 in review |
+| E | Evasion v2 (normalization + homoglyph domains) | v1.5.0 | [#5](https://github.com/AntonioTimo/skillchecker/pull/5) | ✅ released |
+| F | Supply-chain (bundled dependency manifests) | v1.6.0 | — | 🚧 in review |
 
 ---
 
@@ -182,3 +183,75 @@ regex layer.
 
 `docs/ROADMAP.md` lays out the rest of the v3 backlog (taint/data-flow, JS AST,
 supply-chain, …).
+
+---
+
+## Phase F — Supply-chain (bundled dependency manifests) (v1.6.0, in review)
+
+**Goal.** Catch the supply-chain vectors a skill can ship in a *dependency
+manifest* — the roadmap's named "New threat class".
+
+**The gap (RED).** `examples/evil-supplychain/` ships real manifests: a
+`package.json` with `preinstall`/`postinstall` scripts plus a `git+https` dep, a
+bare `attacker/leftpad` shorthand, an off-registry tarball and `*`/`latest` pins;
+a `requirements.txt` with a `git+https` dep, an off-registry tarball, an
+`--extra-index-url`, a non-TLS `http://` source and a bare `requests`; a
+`pyproject.toml` with a `git+` ref, an off-registry wheel and a bare `chalk`; and
+a `yarn.lock` whose `resolved` points at an attacker host. The line rules need a
+runtime install *verb* (`CR021`) or a public-IP literal (`HI019`) — a manifest is
+a *declaration*, so the pre-1.6.0 scanner scored the whole directory **🟢 GREEN,
+exit 0, zero findings**. That silent GREEN is the project's stated worst failure.
+
+**The fix (GREEN).** A new **structural pass** `check_supply_chain` — the
+`check_bundled_config` decision repeated: the threat is the *presence* of a
+source/script/open-pin inside a recognized **manifest file**, so the pass keys off
+manifest **filenames** (which is what keeps a `references/*.json` data file with a
+`dependencies` key GREEN), parses stdlib-only and never executes:
+`CR039` install-lifecycle script (CRITICAL), `HI023` non-registry source (HIGH),
+`ME012` unpinned dep (MEDIUM, one per manifest).
+
+**Key decisions.**
+- **Severity from the FP budget.** `CR039` is CRITICAL — presence-based
+  RCE-on-install, near-empty FP class once keyed to the lifecycle key set (the
+  twin of `CR032` hooks). `HI023` is **HIGH, not CRITICAL**: a monorepo
+  `file:`/fork pin is legitimate-but-discouraged, so the cost is "read and
+  decide" (≤15%), and 3+ HIGH already routes a multi-dep evil manifest to RED.
+  `ME012` is **MEDIUM, open-forms-only**: caret/tilde are the npm/PEP440 default —
+  flagging them would blow the ≤30% budget and cause alarm fatigue (the
+  second-worst failure after the false negative), so they stay GREEN.
+- **The registry-host allowlist is the load-bearing guard.** A lockfile
+  `resolved` at `registry.npmjs.org` and `--index-url https://pypi.org/simple`
+  must stay GREEN; an off-registry host fires. The `package-lock.json` and `go.mod`
+  in `examples/clean-supplychain/` prove it.
+- **Reused existing precedent.** `_parse_json`/`_mentions_key` (safe JSON +
+  textual backstop) from the bundled-config pass; the shallow symlink-skipping
+  discovery loop; `CR021`'s quote-prefix guard already keeps a JSON
+  `"ci": "npm install …"` script value GREEN, so `CR039` keys off the script
+  *name* and never re-introduces it.
+
+**Verified.** evil-supplychain GREEN→RED (exit 3: `CR039`×2, a spread of `HI023`
+across the npm/pip/pyproject/lockfile/Cargo/go.mod forms, `ME012`×3 — one per
+top-level manifest); clean-supplychain GREEN (every guard exercised);
+no regressions across the now-15 example fixtures; self-audit clean (the repo
+ships no real manifest). CI asserts the three rules plus per-source-variant and
+per-manifest-aggregate snippets, so one form breaking silently while another fires
+can't keep CI green.
+
+**Scope honesty.** Narrows `THREAT_MODEL.md` out-of-scope #2 to *partially
+covered*: bundled manifests are scanned; transitive deps, a malicious update to an
+already-pinned registry library, CVE/version reputation (#3), typosquatting (#5),
+and runtime fetches (`CR021`) stay out of scope — they need a network + resolver
+the dependency-free scanner forbids, or are deliberately the user's call.
+
+**Then the code-review round.** An external **Codex** pass found the same *shape*
+of gap the HI019 saga taught: line-heuristics miss the sibling syntactic form.
+Seven were real and all fixed before merge — `requirements.txt` `-e git+`,
+`--opt=value`, and PEP 508 `@ git+ssh://` direct refs; `[project.optional-
+dependencies]` arrays parsed element-wise (multi-line); `go.mod replace => remote`
+(promised under `HI023`, now `_supply_gomod`); the Cargo metadata-skip wrongly
+swallowing `Cargo.lock`'s `[[package]]` sources (double-bracket tables no longer
+skipped; `registry+`/`sparse+` kept GREEN); a `package-lock.json` `funding.url`
+false positive (source keys narrowed to `resolved`/`tarball`); and x-ranges
+(`1.x`) now read as unpinned. Each is locked by a fixture form **and** a CI snippet
+assert, so the parser-form bypass can't silently regress — the lesson re-applied:
+when a line heuristic keeps spawning sibling forms, lock each form in CI.

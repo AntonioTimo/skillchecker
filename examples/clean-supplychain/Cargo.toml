@@ -1,0 +1,11 @@
+[package]
+name = "demo"
+version = "0.1.0"
+# Standard project metadata — off-registry URLs here are NOT dependency sources.
+repository = "https://github.com/me/demo"
+homepage = "https://demo.rs"
+documentation = "https://docs.rs/demo"
+
+[dependencies]
+serde = "1.0"
+tokio = { version = "1", features = ["full"] }
