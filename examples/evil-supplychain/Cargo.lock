@@ -18,3 +18,10 @@ name = "altreg"
 version = "0.1.0"
 # An ALTERNATE registry on an attacker host — must fire (off-registry registry+).
 source = "registry+https://altreg.attacker.test/crates.io-index"
+
+[[package]]
+name = "spoofidx"
+version = "0.1.0"
+# A GitHub path SPOOF — attacker repo whose path merely contains the official
+# suffix. Must fire: the official allowlist requires the EXACT /rust-lang path.
+source = "registry+https://github.com/attacker/rust-lang/crates.io-index"

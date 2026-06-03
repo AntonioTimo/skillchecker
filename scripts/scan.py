@@ -1075,8 +1075,16 @@ def _classify_source(spec):
     if low.startswith(("registry+", "sparse+")):
         inner = s.split("+", 1)[1]
         ih = _host_of(inner)
+        try:
+            ipath = urlsplit(inner).path.rstrip("/").lower()
+        except ValueError:
+            ipath = ""
+        if ipath.endswith(".git"):
+            ipath = ipath[:-4]
+        # Exact official path only — `github.com/attacker/rust-lang/crates.io-index`
+        # is a DIFFERENT repo and must not be allowlisted by a substring match.
         if (ih in ("index.crates.io", "static.crates.io")
-                or (ih == "github.com" and "rust-lang/crates.io-index" in inner.lower())
+                or (ih == "github.com" and ipath == "/rust-lang/crates.io-index")
                 or _is_registry_host(ih)):
             return None
         return "off-registry alternate registry source (" + (ih or inner) + ")"
@@ -1335,9 +1343,9 @@ def _supply_source_scan(text, rel, kind):
         # `registry+https://…` / `sparse+https://…` token is read WITH its prefix
         # (a Cargo.lock registry source is GitHub-hosted; without the prefix the
         # inner github URL would false-positive). git+/hg+/svn+/bzr+ flag as VCS.
-        for m in re.finditer(r"(?i)(?:(?:git|hg|svn|bzr|registry|sparse)\+\S+"
+        for m in re.finditer(r"(?i)(?:(?:git|hg|svn|bzr|registry|sparse)\+[^\s\"'#;,)\]]+"
                              r"|(?:https?|ftp)://[^\s\"'#;,)\]]+"
-                             r"|(?:github|gitlab|bitbucket):\S+)", line):
+                             r"|(?:github|gitlab|bitbucket):[^\s\"'#;,)\]]+)", line):
             reason = _classify_source(m.group(0))
             if reason and reason not in seen:
                 seen.add(reason)

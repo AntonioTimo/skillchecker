@@ -109,6 +109,16 @@ A second Codex pass found three more (all fixed, fixture + CI-locked):
 - **Poetry `[[tool.poetry.source]]`** custom source redirect (`url = …`) is now
   read — an off-registry source flags, the default `pypi` source stays GREEN.
 
+A third Codex pass found one more:
+- **Cargo official-index allowlist matched the GitHub path by substring** — so
+  `registry+https://github.com/attacker/rust-lang/crates.io-index` (a different
+  repo) read GREEN. The path is now parsed and required to equal exactly
+  `/rust-lang/crates.io-index` (trailing slash / `.git` tolerated). Fixing it
+  surfaced that the generic source-scan token regex swallowed the closing quote
+  into the URL, which the exact-path check then rejected — the token char class now
+  excludes quotes, so both the spoof (fires) and the official index (GREEN) resolve
+  correctly.
+
 ## [1.5.0] — 2026-06-02
 
 First v3 increment: **Evasion v2** — normalization and homoglyph-domain coverage.
