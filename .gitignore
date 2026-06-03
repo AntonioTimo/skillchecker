@@ -17,3 +17,6 @@ __pycache__/
 # Local testing
 /tmp/
 .scratch/
+
+# Local-only working notes (per-session dev flow; never shipped with the skill)
+CLAUDE.md
