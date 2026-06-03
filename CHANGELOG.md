@@ -73,6 +73,32 @@ CVE/version reputation (#3), typosquatting (#5), and runtime fetches (`CR021`'s
 job) remain out of scope — the dependency-free, no-network scanner reads the direct
 manifest only.
 
+### Fixed (pre-release code-review — Codex)
+An external Codex pass over the branch found parser-form gaps; all fixed before
+merge, each locked by a fixture form + a CI snippet assert:
+- **`requirements.txt` source forms** — an `-e git+https://…` editable remote, a
+  `--extra-index-url=…` (the `--opt=value` equals form), and a PEP 508
+  `name @ git+ssh://…` direct reference all read GREEN. `_classify_source` now
+  strips the PEP 508 `@` marker (so `@ git+ssh://…` classifies), the option parser
+  accepts `--opt=value` and `-e`/`--editable`, and `git+ssh://` matches as VCS.
+- **`[project.optional-dependencies]` arrays** — parsed element-wise now (incl.
+  multi-line accumulation), so `dev = ["evil @ git+…", "bare"]` yields `HI023` +
+  `ME012` instead of being read as one row.
+- **`go.mod replace => remote`** — promised under `HI023` but unimplemented; now a
+  dedicated `_supply_gomod` flags a `replace` whose target is a remote module
+  (single-line and `replace ( … )` block), while a local `=> ../vendor` and a
+  normal `require` stay GREEN.
+- **`Cargo.lock` `[[package]]` regression** — the Cargo metadata-skip wrongly
+  skipped `[[package]]` array-of-tables (where lock `source` lives). Double-bracket
+  tables are no longer skipped; a `source = "git+https://…"` flags while a normal
+  `registry+`/`sparse+` source (the GitHub-hosted crates.io index) stays GREEN.
+- **`package-lock.json` metadata FP** — a `funding.url` / `repository.url` was read
+  as a dependency source; the lock walk now inspects only `resolved`/`tarball`.
+- **x-range `1.x` / `1.2.*`** now read as unpinned (`ME012`), matching the rule
+  table; caret/tilde/exact stay pinned.
+- `README.md` Limitation #2 updated from "No supply-chain analysis" to the partial
+  coverage now shipped.
+
 ## [1.5.0] — 2026-06-02
 
 First v3 increment: **Evasion v2** — normalization and homoglyph-domain coverage.

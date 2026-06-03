@@ -7,6 +7,13 @@ dependencies = [
   "chalk",
 ]
 
+[project.optional-dependencies]
+# A multi-line PEP 621 group array — each element parsed individually.
+dev = [
+  "tool @ git+https://github.com/attacker/tool.git",
+  "loosepkg",
+]
+
 [project.urls]
 # A metadata URL — section-aware parse must NOT read this as a dependency source.
 Homepage = "https://github.com/attacker/evil"

@@ -241,3 +241,16 @@ covered*: bundled manifests are scanned; transitive deps, a malicious update to 
 already-pinned registry library, CVE/version reputation (#3), typosquatting (#5),
 and runtime fetches (`CR021`) stay out of scope — they need a network + resolver
 the dependency-free scanner forbids, or are deliberately the user's call.
+
+**Then the code-review round.** An external **Codex** pass found the same *shape*
+of gap the HI019 saga taught: line-heuristics miss the sibling syntactic form.
+Seven were real and all fixed before merge — `requirements.txt` `-e git+`,
+`--opt=value`, and PEP 508 `@ git+ssh://` direct refs; `[project.optional-
+dependencies]` arrays parsed element-wise (multi-line); `go.mod replace => remote`
+(promised under `HI023`, now `_supply_gomod`); the Cargo metadata-skip wrongly
+swallowing `Cargo.lock`'s `[[package]]` sources (double-bracket tables no longer
+skipped; `registry+`/`sparse+` kept GREEN); a `package-lock.json` `funding.url`
+false positive (source keys narrowed to `resolved`/`tarball`); and x-ranges
+(`1.x`) now read as unpinned. Each is locked by a fixture form **and** a CI snippet
+assert, so the parser-form bypass can't silently regress — the lesson re-applied:
+when a line heuristic keeps spawning sibling forms, lock each form in CI.

@@ -1057,6 +1057,8 @@ def _classify_source(spec):
     source (the HI023 signal), else None. Local / workspace / relative paths and
     registry URLs return None."""
     s = _unquote(spec)
+    if s.startswith("@"):                 # PEP 508 direct-ref marker (`name @ url`)
+        s = s[1:].strip()
     if not s:
         return None
     low = s.lower()
@@ -1064,6 +1066,11 @@ def _classify_source(spec):
     # Local / workspace / protocol-alias / relative — not a remote bypass.
     if low.startswith(("file:", "link:", "portal:", "workspace:", "path:",
                        "npm:", "./", "../", ".\\", "..\\", "/", "~")):
+        return None
+
+    # Registry source prefixes (Cargo.lock `registry+…` / `sparse+…`). The crates.io
+    # index is GitHub-hosted, so without this a normal lock would false-positive.
+    if low.startswith(("registry+", "sparse+")):
         return None
 
     # VCS scheme prefixes (git+https, git+ssh, hg+, svn+, bzr+, git://, git@host:).
@@ -1111,7 +1118,11 @@ def _is_pinned(spec) -> bool:
         return True
     if low in ("*", "x", "latest", "next") or low == "":
         return False
-    if re.fullmatch(r"[*xX](\.[*xX0-9]+)*", s):       # *, x, 1.x, 1.* → unpinned
+    # x-range / wildcard anywhere: *, x, 1.x, 1.2.x, 1.* → unpinned (an `x`/`*`
+    # version component, the rest digits). Matches the rule table's open forms.
+    xparts = s.lstrip("vV=").split(".")
+    if (any(p in ("x", "X", "*") for p in xparts)
+            and all(p.isdigit() or p in ("x", "X", "*", "") for p in xparts)):
         return False
     # Unbounded lower-bound only: >=1.0 / >1.0 with no upper bound, no comma.
     if re.match(r"^>=?\s*[0-9]", s) and "," not in s and "<" not in s:
@@ -1146,12 +1157,19 @@ def _supply_requirements(text, rel):
     for line, ln in _join_requirements_lines(text):
         low = line.lower()
         if line.startswith("-"):
-            # Option lines: index/source redirects and trusted-host disable TLS.
-            if re.match(r"(?i)^(--index-url|--extra-index-url|-i|--trusted-host)\b", line):
-                val = line.split(None, 1)[1].strip() if " " in line else ""
-                reason = _classify_source(val) if "://" in val else (
-                    "off-registry index host (" + val + ")"
-                    if val and not _is_registry_host(_host_of("//" + val) or val) else None)
+            # Option lines: index/source redirects, trusted-host (disables TLS),
+            # and editable installs. Accept both `--opt value` and `--opt=value`.
+            om = re.match(r"(?i)^(--index-url|--extra-index-url|-i|--trusted-host|-e|--editable)(?:[=\s]+(.*))?$", line)
+            if om:
+                opt, val = om.group(1).lower(), (om.group(2) or "").strip()
+                if opt in ("-e", "--editable"):
+                    reason = _classify_source(val)            # remote VCS/URL; local ./ skipped
+                elif "://" in val:
+                    reason = _classify_source(val)            # --index-url with a URL
+                elif val and not _is_registry_host(_host_of("//" + val) or val):
+                    reason = "off-registry index host (" + val + ")"   # bare --trusted-host
+                else:
+                    reason = None
                 if reason:
                     findings.append(Finding(
                         severity="HIGH", rule_id="HI023", file=rel, line=ln,
@@ -1185,17 +1203,17 @@ def _supply_requirements(text, rel):
 
 
 def _supply_pyproject(text, rel):
-    """Section-aware line parse of pyproject.toml — only the dependency tables
-    ([project] dependencies array, [project.optional-dependencies],
-    [tool.poetry.(dev-)dependencies]). [project.urls] and other metadata are
-    ignored, so a Homepage git URL never fires."""
+    """Section-aware line parse of pyproject.toml — only the dependency tables:
+    the PEP 621 `[project]` `dependencies`/`optional-dependencies` arrays, the
+    `[project.optional-dependencies]` group arrays, and the Poetry
+    `[tool.poetry(.group.*).(dev-)dependencies]` tables. Arrays are accumulated
+    across lines so a dep on a continuation line is not a silent miss.
+    `[project.urls]` and other metadata are ignored, so a Homepage git URL never
+    fires."""
     findings, unpinned = [], []
     section = ""
-    in_array = False                                 # inside `dependencies = [ … ]`
-    DEP_SECTIONS = ("project.dependencies-array",)   # synthetic marker for the array
-    def is_dep_section(sec):
-        return (sec in ("tool.poetry.dependencies", "tool.poetry.dev-dependencies")
-                or sec.startswith("project.optional-dependencies"))
+    in_array = False                                 # accumulating a PEP 508 array
+
     def handle_dep(name, spec, ln, raw):
         reason = _classify_source(spec)
         if reason:
@@ -1207,6 +1225,19 @@ def _supply_pyproject(text, rel):
                 suggested_fix="Pin to a registry release, or vendor and audit the source."))
         elif name and not _is_pinned(spec):
             unpinned.append(name)
+
+    def handle_pep508(item, ln, raw):
+        nm = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)", item)
+        spec = item[nm.end():].strip() if nm else item
+        handle_dep(nm.group(1) if nm else "", spec, ln, raw)
+
+    def is_poetry_table(sec):
+        return (sec in ("tool.poetry.dependencies", "tool.poetry.dev-dependencies")
+                or (sec.startswith("tool.poetry.group.") and sec.endswith(".dependencies")))
+
+    def is_pep508_array_section(sec):
+        return sec == "project" or sec.startswith("project.optional-dependencies")
+
     for ln_no, raw in enumerate(text.splitlines(), start=1):
         line = re.sub(r"(?:^|\s)#.*$", "", raw).rstrip()
         st = line.strip()
@@ -1216,37 +1247,34 @@ def _supply_pyproject(text, rel):
         if hm:
             section, in_array = hm.group(1).strip(), False
             continue
-        # PEP 621: dependencies = [ "name>=1", ... ]  (possibly multi-line)
-        if section == "project" and re.match(r"^(?:dependencies|optional-dependencies)\b", st):
-            in_array = "[" in st and "]" not in st
-            for item in re.findall(r"\"([^\"]+)\"|'([^']+)'", st):
-                val = item[0] or item[1]
-                name = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)", val)
-                spec = val[name.end():].strip() if name else val
-                handle_dep(name.group(1) if name else "", spec, ln_no, raw)
-            continue
-        if in_array:
+        if in_array:                                 # continuation of a PEP 508 array
+            for a, b in re.findall(r"\"([^\"]+)\"|'([^']+)'", st):
+                handle_pep508(a or b, ln_no, raw)
             if "]" in st:
                 in_array = False
-            for item in re.findall(r"\"([^\"]+)\"|'([^']+)'", st):
-                val = item[0] or item[1]
-                name = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)", val)
-                spec = val[name.end():].strip() if name else val
-                handle_dep(name.group(1) if name else "", spec, ln_no, raw)
             continue
-        # Poetry / optional tables:  name = "^1.2"  or  name = { git = "…" }
-        if is_dep_section(section):
+        if is_pep508_array_section(section):
+            am = re.match(r"^([A-Za-z0-9_.-]+)\s*=\s*\[(.*)$", st)
+            if am:
+                key = am.group(1).strip()
+                # under [project] only the dep keys are deps (not keywords/classifiers);
+                # under [project.optional-dependencies] every key is a dep group.
+                if section != "project" or key in ("dependencies", "optional-dependencies"):
+                    for a, b in re.findall(r"\"([^\"]+)\"|'([^']+)'", am.group(2)):
+                        handle_pep508(a or b, ln_no, raw)
+                    in_array = "]" not in st
+                    continue
+        if is_poetry_table(section):                 # name = "^1.2"  or  name = { git = "…" }
             km = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(.+)$", st)
             if not km:
                 continue
             name, val = km.group(1), km.group(2).strip()
-            if name.lower() == "python":            # poetry's python constraint, not a dep
+            if name.lower() == "python":             # poetry's python constraint, not a dep
                 continue
-            if val.startswith("{"):                 # inline table: scan for git/url/path
+            if val.startswith("{"):                  # inline table: scan for git/url/path
                 im = re.search(r"(?:git|url)\s*=\s*([\"'][^\"']+[\"'])", val)
                 if im:
                     handle_dep(name, im.group(1), ln_no, raw)
-                # else: a {version=…, …} table — read version for pinning
                 vm = re.search(r"version\s*=\s*([\"'][^\"']+[\"'])", val)
                 if vm and not _is_pinned(vm.group(1)):
                     unpinned.append(name)
@@ -1261,24 +1289,34 @@ def _supply_source_scan(text, rel, kind):
     environment.yml). Flags VCS / off-registry-URL / shorthand sources per line;
     no ME012 (unpinned) detection for these kinds. Dedups HI023 per host/reason.
 
-    Section-aware for TOML manifests: skips project-METADATA sections
-    ([package], [package.metadata.*], [badges], [workspace.package]) so a crate's
-    repository / homepage / documentation URL — present on nearly every published
-    crate — is not misread as a dependency source. Dependency / [source.*] tables
-    are still scanned. For non-TOML manifests no [section] header matches, so the
-    skip is inert and behavior is unchanged."""
+    Section-aware for TOML manifests: skips a single-bracket project-METADATA
+    section ([package], [package.metadata.*], [badges], [workspace.package]) so a
+    crate's repository / homepage / documentation URL — present on nearly every
+    published crate — is not misread as a dependency source. A DOUBLE-bracket
+    array-of-tables ([[package]] in Cargo.lock) is NOT metadata — it is a locked
+    dependency entry whose `source` field must be scanned — so it is never skipped.
+    Dependency / [source.*] tables are still scanned. For non-TOML manifests no
+    [section] header matches, so the skip is inert and behavior is unchanged."""
     findings, seen = [], set()
-    section = ""
+    skip_section = False
     for ln_no, raw in enumerate(text.splitlines(), start=1):
         line = re.sub(r"(?:^|\s)#.*$", "", raw)
-        hm = re.match(r"^\s*\[+\s*([^\]]+?)\s*\]+\s*$", line)
+        hm = re.match(r"^\s*(\[\[?)\s*([^\]]+?)\s*\]\]?\s*$", line)
         if hm:
-            section = hm.group(1).strip().strip("\"'").lower()
+            is_array_table = hm.group(1) == "[["
+            sec = hm.group(2).strip().strip("\"'").lower()
+            skip_section = (not is_array_table) and (
+                sec == "package" or sec.startswith("package.")
+                or sec in ("badges", "workspace.package"))
             continue
-        if (section == "package" or section.startswith("package.")
-                or section in ("badges", "workspace.package")):
+        if skip_section:
             continue
-        for m in re.finditer(r"(?i)(?:git\+\S+|(?:https?|ftp)://[^\s\"'#;,)\]]+"
+        # The scheme-prefix alternative is matched FIRST and greedily so a
+        # `registry+https://…` / `sparse+https://…` token is read WITH its prefix
+        # (a Cargo.lock registry source is GitHub-hosted; without the prefix the
+        # inner github URL would false-positive). git+/hg+/svn+/bzr+ flag as VCS.
+        for m in re.finditer(r"(?i)(?:(?:git|hg|svn|bzr|registry|sparse)\+\S+"
+                             r"|(?:https?|ftp)://[^\s\"'#;,)\]]+"
                              r"|(?:github|gitlab|bitbucket):\S+)", line):
             reason = _classify_source(m.group(0))
             if reason and reason not in seen:
@@ -1292,14 +1330,57 @@ def _supply_source_scan(text, rel, kind):
     return findings
 
 
+def _supply_gomod(text, rel):
+    """go.mod source scan. Normal `require github.com/x/y vN` lines are pinned +
+    checksummed by go.sum (not flagged). The supply-chain signal is a
+    `replace OLD => NEW` whose NEW is a REMOTE module path (a host-like first
+    segment, not a local `./`/`../`/`/` path) — it redirects a dependency to a
+    different, possibly attacker-controlled, module. Handles the single-line form
+    and the `replace ( … )` block."""
+    findings, seen = [], set()
+    in_block = False
+    for ln_no, raw in enumerate(text.splitlines(), start=1):
+        line = raw.split("//", 1)[0].strip()
+        if not line:
+            continue
+        if re.match(r"^replace\s*\($", line):
+            in_block = True
+            continue
+        if in_block and line == ")":
+            in_block = False
+            continue
+        target = None
+        m = re.match(r"^replace\s+\S.*?=>\s*(\S+)", line)
+        if m:
+            target = m.group(1)
+        elif in_block:
+            m2 = re.match(r"^\S.*?=>\s*(\S+)", line)
+            if m2:
+                target = m2.group(1)
+        if not target or target.startswith(("./", "../", "/", ".\\", "..\\")):
+            continue                                  # local replace — fine
+        host_seg = target.split("/", 1)[0]
+        if "." in host_seg and host_seg not in seen:  # remote module path
+            seen.add(host_seg)
+            findings.append(Finding(
+                severity="HIGH", rule_id="HI023", file=rel, line=ln_no,
+                snippet=line[:120],
+                why="go.mod `replace` redirects a dependency to a remote module (" + target
+                    + ") — swaps the resolved source for a different, possibly attacker-controlled, host.",
+                suggested_fix="Remove the replace, or point it at an audited local vendor path."))
+    return findings
+
+
 def _supply_json_lock(data, rel):
     """Walk a JSON lockfile (package-lock.json / npm-shrinkwrap.json) for
-    `resolved` / `tarball` URLs that point off-registry. Dedups per host."""
+    `resolved` / `tarball` URLs that point off-registry. Dedups per host. Only the
+    dependency-SOURCE keys are inspected — a metadata `url` (e.g. `funding.url`,
+    `repository.url`) is not a source and would otherwise false-positive."""
     findings, seen = [], set()
     def walk(node):
         if isinstance(node, dict):
             for k, v in node.items():
-                if k in ("resolved", "tarball", "url") and isinstance(v, str):
+                if k in ("resolved", "tarball") and isinstance(v, str):
                     reason = _classify_source(v)
                     if reason:
                         host = _host_of(v) or reason
@@ -1411,6 +1492,9 @@ def check_supply_chain(skill_root: Path) -> list[Finding]:
             text = _read_text_safe(path) or ""
             fs, unpinned = _supply_pyproject(text, rel)
             findings.extend(fs)
+        elif name == "go.mod":
+            text = _read_text_safe(path) or ""
+            findings.extend(_supply_gomod(text, rel))
         else:
             text = _read_text_safe(path) or ""
             findings.extend(_supply_source_scan(text, rel, kind))
