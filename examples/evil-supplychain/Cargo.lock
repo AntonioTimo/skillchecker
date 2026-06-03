@@ -9,6 +9,12 @@ source = "git+https://github.com/attacker/evil-crate#abcdef0123456789"
 [[package]]
 name = "serde"
 version = "1.0.0"
-# A normal registry source is GitHub-hosted but must NOT fire (registry+ prefix).
+# A normal registry source is GitHub-hosted but must NOT fire (official index).
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[[package]]
+name = "altreg"
+version = "0.1.0"
+# An ALTERNATE registry on an attacker host — must fire (off-registry registry+).
+source = "registry+https://altreg.attacker.test/crates.io-index"

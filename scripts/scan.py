@@ -1068,10 +1068,18 @@ def _classify_source(spec):
                        "npm:", "./", "../", ".\\", "..\\", "/", "~")):
         return None
 
-    # Registry source prefixes (Cargo.lock `registry+…` / `sparse+…`). The crates.io
-    # index is GitHub-hosted, so without this a normal lock would false-positive.
+    # Registry source prefixes (Cargo.lock `registry+…` / `sparse+…`). Only the
+    # OFFICIAL crates.io index (the GitHub-hosted git index or the sparse index) and
+    # a known registry host are exempt — `registry+https://attacker.test/…` is an
+    # off-registry alternate registry and still flags.
     if low.startswith(("registry+", "sparse+")):
-        return None
+        inner = s.split("+", 1)[1]
+        ih = _host_of(inner)
+        if (ih in ("index.crates.io", "static.crates.io")
+                or (ih == "github.com" and "rust-lang/crates.io-index" in inner.lower())
+                or _is_registry_host(ih)):
+            return None
+        return "off-registry alternate registry source (" + (ih or inner) + ")"
 
     # VCS scheme prefixes (git+https, git+ssh, hg+, svn+, bzr+, git://, git@host:).
     for p in _VCS_PREFIXES:
@@ -1159,11 +1167,11 @@ def _supply_requirements(text, rel):
         if line.startswith("-"):
             # Option lines: index/source redirects, trusted-host (disables TLS),
             # and editable installs. Accept both `--opt value` and `--opt=value`.
-            om = re.match(r"(?i)^(--index-url|--extra-index-url|-i|--trusted-host|-e|--editable)(?:[=\s]+(.*))?$", line)
+            om = re.match(r"(?i)^(--index-url|--extra-index-url|-i|--trusted-host|-e|--editable|-f|--find-links)(?:[=\s]+(.*))?$", line)
             if om:
                 opt, val = om.group(1).lower(), (om.group(2) or "").strip()
-                if opt in ("-e", "--editable"):
-                    reason = _classify_source(val)            # remote VCS/URL; local ./ skipped
+                if opt in ("-e", "--editable", "-f", "--find-links"):
+                    reason = _classify_source(val)            # remote VCS/URL source; local ./ skipped
                 elif "://" in val:
                     reason = _classify_source(val)            # --index-url with a URL
                 elif val and not _is_registry_host(_host_of("//" + val) or val):
@@ -1252,6 +1260,18 @@ def _supply_pyproject(text, rel):
                 handle_pep508(a or b, ln_no, raw)
             if "]" in st:
                 in_array = False
+            continue
+        if section == "tool.poetry.source":          # [[tool.poetry.source]] url = "…"
+            um = re.search(r"(?i)\burl\s*=\s*[\"']([^\"']+)[\"']", st)
+            if um:
+                reason = _classify_source(um.group(1))
+                if reason:
+                    findings.append(Finding(
+                        severity="HIGH", rule_id="HI023", file=rel, line=ln_no,
+                        snippet=raw.strip()[:120],
+                        why="Poetry custom package source points off-registry — " + reason
+                            + "; a dependency tagged with this source is fetched past the default registry's audit.",
+                        suggested_fix="Remove the custom source, or point it at the official index."))
             continue
         if is_pep508_array_section(section):
             am = re.match(r"^([A-Za-z0-9_.-]+)\s*=\s*\[(.*)$", st)

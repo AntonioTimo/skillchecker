@@ -229,8 +229,9 @@ manifest **filenames** (which is what keeps a `references/*.json` data file with
   `"ci": "npm install …"` script value GREEN, so `CR039` keys off the script
   *name* and never re-introduces it.
 
-**Verified.** evil-supplychain GREEN→RED (exit 3: `CR039`×2, `HI023`×10,
-`ME012`×3 — one per manifest); clean-supplychain GREEN (every guard exercised);
+**Verified.** evil-supplychain GREEN→RED (exit 3: `CR039`×2, a spread of `HI023`
+across the npm/pip/pyproject/lockfile/Cargo/go.mod forms, `ME012`×3 — one per
+top-level manifest); clean-supplychain GREEN (every guard exercised);
 no regressions across the now-15 example fixtures; self-audit clean (the repo
 ships no real manifest). CI asserts the three rules plus per-source-variant and
 per-manifest-aggregate snippets, so one form breaking silently while another fires

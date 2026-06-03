@@ -99,6 +99,16 @@ merge, each locked by a fixture form + a CI snippet assert:
 - `README.md` Limitation #2 updated from "No supply-chain analysis" to the partial
   coverage now shipped.
 
+A second Codex pass found three more (all fixed, fixture + CI-locked):
+- **`registry+`/`sparse+` allowlist was too broad** — it exempted *any* host, so a
+  `registry+https://attacker.test/…` alternate registry read GREEN. Now only the
+  official crates.io index (the GitHub-hosted git index / `index.crates.io` sparse)
+  and known registry hosts are exempt; an off-host alternate registry flags.
+- **pip `--find-links` / `-f`** (a package-source redirect) was skipped — now
+  classified like `--index-url` (remote flags, a local `./wheels` path stays GREEN).
+- **Poetry `[[tool.poetry.source]]`** custom source redirect (`url = …`) is now
+  read — an off-registry source flags, the default `pypi` source stays GREEN.
+
 ## [1.5.0] — 2026-06-02
 
 First v3 increment: **Evasion v2** — normalization and homoglyph-domain coverage.
