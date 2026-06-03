@@ -374,6 +374,32 @@ def _zip_safety_check(zf: zipfile.ZipFile) -> str | None:
 
 ---
 
+## § Supply-chain (bundled dependency manifests)
+
+**Когда нужно:** скилл тащит манифест зависимостей (`package.json`,
+`requirements.txt`, `pyproject.toml`, lockfile) с install-скриптом (CR039),
+не-реестровым источником (HI023) или unpinned-зависимостью (ME012).
+
+- **CR039** (`preinstall`/`postinstall`/`prepare`/… в `package.json`) — это
+  **refuse (RED)**, не патч. Скрипт исполняется автоматически на голом
+  `npm install`, allowed-tools не нужен. Скилл — это `SKILL.md` + `scripts/` +
+  `references/`, а не npm-пакет; install-скрипт здесь всегда лишний. Как и хуки
+  (CR032) — не патчим вокруг, удаляем.
+- **HI023** (зависимость из git/URL/tarball/non-TLS/index-redirect): запинить на
+  релиз из реестра (`name==X.Y.Z` / `"name": "X.Y.Z"`), убрав git/URL/shorthand.
+  Если нужен форк — вендорить и аудировать исходник явно, не тянуть на install.
+  Реестровые источники (`pypi.org`, `registry.npmjs.org`, …) и локальные пути
+  (`workspace:`, `file:../`) и так не флагаются.
+- **ME012** (unpinned: `*`, `latest`, голое имя, `>=` без потолка): запинить
+  точную версию или залочить с `--hash`. Bounded-диапазоны (`^`, `~`, `==`) уже
+  считаются достаточным пином — их трогать не надо.
+
+Caveat: проход читает **прямой** манифест. Транзитивные зависимости, вредоносное
+обновление уже-запинненной библиотеки, CVE и репутацию версии он не видит —
+это `pip-audit`/`npm audit` и решение пользователя (см. THREAT_MODEL out-of-scope).
+
+---
+
 ## Применение патчей — порядок
 
 Если в скилле много YELLOW-находок, применяй патчи в этом порядке:

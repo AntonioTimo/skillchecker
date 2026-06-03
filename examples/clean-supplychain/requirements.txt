@@ -1,0 +1,4 @@
+# Hygienic: exact pins, hashed, default registry. Must stay GREEN.
+requests==2.31.0 --hash=sha256:c97dfde1f7bd43a71c8d2a58e369e9b2bf692d1334ea9f9cae55add7d0dd0f84
+flask==3.0.0
+urllib3==2.2.1

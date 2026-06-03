@@ -948,6 +948,488 @@ def check_bundled_config(skill_root: Path) -> list[Finding]:
 
 
 # --------------------------------------------------------------------------
+# Supply-chain audit (bundled dependency manifests)
+#
+# A skill is SKILL.md + scripts/ + references/. A bundled dependency manifest
+# (package.json, requirements.txt, pyproject.toml, a lockfile, …) is a
+# DECLARATION, not a command — so the line rules, which need a runtime install
+# verb (CR021) or a public-IP literal (HI019), never see its dangerous forms:
+#   - an npm install-lifecycle script (preinstall/postinstall/…) → arbitrary
+#     shell on a plain `npm install`, the static twin of a bundled hook (CR032);
+#   - a dependency pulled from a NON-REGISTRY source (VCS, an arbitrary URL /
+#     tarball / wheel, non-TLS http, an index/source redirect, a poisoned
+#     lockfile `resolved`) → bypasses the registry's signing/audit;
+#   - an UNPINNED dep (`*`, `latest`, a bare name, an unbounded `>=`) → a future
+#     malicious release lands silently at the next install.
+#
+# Detection is STRUCTURAL and keys off manifest FILENAMES (like
+# check_bundled_config keys off config filenames) — so a references/*.json data
+# file with a "dependencies" key, and prose / fenced docs, stay GREEN. Parsing is
+# stdlib-only and NEVER executes the file: json.loads for package.json / JSON
+# locks, a line-based section-aware parse for requirements / pyproject, and a
+# generic source-line scan for the remaining text manifests (no tomllib — keeps
+# the existing 3.9 floor; no yaml.load — CR017 itself bans it). On parse failure
+# it degrades to a textual note, never raising.
+# --------------------------------------------------------------------------
+
+# npm script keys the package manager runs AUTOMATICALLY on a plain install.
+LIFECYCLE_SCRIPTS = {"preinstall", "install", "postinstall",
+                     "prepare", "prepublish", "prepublishOnly"}
+
+# Hosts that ARE the registry — a URL here is not an off-registry bypass.
+REGISTRY_HOSTS = frozenset({
+    "pypi.org", "files.pythonhosted.org",
+    "registry.npmjs.org", "registry.yarnpkg.com", "registry.npmmirror.com",
+    "crates.io", "static.crates.io",
+    "rubygems.org",
+    "proxy.golang.org",
+    "conda.anaconda.org", "repo.anaconda.com",
+})
+
+# Manifest filenames we inspect (the filename gate). Lockfiles are scanned for
+# off-registry SOURCE only — never for ME012 (a lock IS the pin).
+SUPPLY_MANIFEST_NAMES = {
+    "package.json", "package-lock.json", "npm-shrinkwrap.json",
+    "yarn.lock", "pnpm-lock.yaml",
+    "Pipfile", "Pipfile.lock", "pyproject.toml",
+    "Gemfile", "Gemfile.lock",
+    "Cargo.toml", "Cargo.lock",
+    "go.mod",
+    "environment.yml", "environment.yaml",
+}
+LOCKFILE_NAMES = {
+    "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+    "Pipfile.lock", "Gemfile.lock", "Cargo.lock",
+}
+# ME012 (unpinned) applies only to these top-level manifest kinds — a lock pins
+# by construction, and go.mod is pinned + checksummed by go.sum.
+ME012_KINDS = {"package.json", "pyproject.toml", "requirements"}
+
+# Where a manifest can live (root + one level into common subdirs). Mirrors
+# check_bundled_config's shallow, symlink-skipping discovery.
+SUPPLY_SEARCH_SUBDIRS = ("scripts", "references", "assets")
+
+_VCS_PREFIXES = ("git+", "hg+", "svn+", "bzr+", "git://", "git@")
+
+
+def _is_requirements_txt(name: str) -> bool:
+    return name.startswith("requirements") and name.endswith(".txt")
+
+
+def _host_of(url: str) -> str:
+    try:
+        return (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _is_registry_host(host: str) -> bool:
+    host = (host or "").lower()
+    return host in REGISTRY_HOSTS or any(host.endswith("." + h) for h in REGISTRY_HOSTS)
+
+
+def _unquote(spec) -> str:
+    s = "" if spec is None else str(spec).strip()
+    if len(s) >= 2 and s[0] in "\"'" and s[-1] == s[0]:
+        s = s[1:-1].strip()
+    return s
+
+
+def _is_npm_bare_shorthand(s: str) -> bool:
+    """`user/repo` (npm's github shorthand): exactly one slash, no scheme, no
+    leading @scope, left segment not a protocol word, and not a version range —
+    so `^1.2.3` / `~2` / `1.x` / `*` / `latest` / `dist/index.js`-style values
+    never match (a real dep value is a version or a source, not a bin path)."""
+    s = s.strip()
+    if s.count("/") != 1 or "://" in s or s.startswith("@"):
+        return False
+    left = s.split("/", 1)[0].lower()
+    if left in {"npm", "file", "link", "workspace", "portal", "path",
+                "github", "gitlab", "bitbucket"}:
+        return False
+    if re.search(r"[<>=~^*\s]", s) or s[:1].isdigit():
+        return False
+    return bool(re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*(#.+)?$", s))
+
+
+def _classify_source(spec):
+    """Return a short reason string if `spec` names a NON-REGISTRY dependency
+    source (the HI023 signal), else None. Local / workspace / relative paths and
+    registry URLs return None."""
+    s = _unquote(spec)
+    if not s:
+        return None
+    low = s.lower()
+
+    # Local / workspace / protocol-alias / relative — not a remote bypass.
+    if low.startswith(("file:", "link:", "portal:", "workspace:", "path:",
+                       "npm:", "./", "../", ".\\", "..\\", "/", "~")):
+        return None
+
+    # VCS scheme prefixes (git+https, git+ssh, hg+, svn+, bzr+, git://, git@host:).
+    for p in _VCS_PREFIXES:
+        if low.startswith(p):
+            return "VCS dependency source (" + p.rstrip("+:") + ")"
+
+    # github:/gitlab:/bitbucket: shorthand.
+    m = re.match(r"(?i)^(github|gitlab|bitbucket):", s)
+    if m:
+        return "VCS shorthand (" + m.group(1).lower() + ":)"
+
+    # Any http(s)/ftp URL inside the spec (covers `name @ https://…` and bare URLs).
+    um = re.search(r"(?i)(https?|ftp)://[^\s\"'#;,)\]]+", s)
+    if um:
+        url, scheme = um.group(0), um.group(1).lower()
+        host = _host_of(url)
+        if scheme == "http":
+            return "non-TLS http dependency source (" + (host or "?") + ")"
+        if host and not _is_registry_host(host):
+            return "off-registry URL dependency source (" + host + ")"
+        return None  # registry https — fine
+
+    # Bare npm github shorthand `user/repo`.
+    if _is_npm_bare_shorthand(s):
+        return "git shorthand dependency (user/repo)"
+
+    return None
+
+
+def _is_pinned(spec) -> bool:
+    """True if a dependency version specifier is pinned ENOUGH to stay GREEN:
+    an exact `==`/`===`/exact-semver/`=X.Y.Z`, a `--hash`-locked line, OR a
+    bounded range (`^`, `~`, `~=`, `<`-bounded, comma-bounded). Only the truly
+    OPEN forms (`*`, `latest`/`next`, `x`-range, bare-empty, unbounded `>=`/`>`)
+    are unpinned — caret/tilde are the npm/PEP440 default and flagging them would
+    blow the MEDIUM budget."""
+    s = _unquote(spec)
+    low = s.lower()
+    if not s:
+        return False  # bare name, no version → unpinned
+    # Local / workspace / protocol specs are pinned by locality.
+    if low.startswith(("file:", "link:", "portal:", "workspace:", "path:",
+                       "npm:", "./", "../", "/", "~")):
+        return True
+    if low in ("*", "x", "latest", "next") or low == "":
+        return False
+    if re.fullmatch(r"[*xX](\.[*xX0-9]+)*", s):       # *, x, 1.x, 1.* → unpinned
+        return False
+    # Unbounded lower-bound only: >=1.0 / >1.0 with no upper bound, no comma.
+    if re.match(r"^>=?\s*[0-9]", s) and "," not in s and "<" not in s:
+        return False
+    return True  # exact / bounded / hashed / caret / tilde → pinned-enough
+
+
+# --- per-manifest parsers (each yields (name, spec, lineno); never executes) ---
+
+def _join_requirements_lines(text):
+    """Yield (logical_line, lineno) for a requirements file, joining
+    `\\`-continuations and stripping comments (a `#` at line start or after
+    whitespace — a URL fragment `…#egg=` is preceded by non-space and survives)."""
+    buf, start = "", 0
+    for ln_no, raw in enumerate(text.splitlines(), start=1):
+        line = re.sub(r"(?:^|\s)#.*$", "", raw)
+        if not buf:
+            start = ln_no
+        if line.rstrip().endswith("\\"):
+            buf += line.rstrip()[:-1] + " "
+            continue
+        buf += line
+        if buf.strip():
+            yield buf.strip(), start
+        buf = ""
+    if buf.strip():
+        yield buf.strip(), start
+
+
+def _supply_requirements(text, rel):
+    findings, unpinned = [], []
+    for line, ln in _join_requirements_lines(text):
+        low = line.lower()
+        if line.startswith("-"):
+            # Option lines: index/source redirects and trusted-host disable TLS.
+            if re.match(r"(?i)^(--index-url|--extra-index-url|-i|--trusted-host)\b", line):
+                val = line.split(None, 1)[1].strip() if " " in line else ""
+                reason = _classify_source(val) if "://" in val else (
+                    "off-registry index host (" + val + ")"
+                    if val and not _is_registry_host(_host_of("//" + val) or val) else None)
+                if reason:
+                    findings.append(Finding(
+                        severity="HIGH", rule_id="HI023", file=rel, line=ln,
+                        snippet=line[:120],
+                        why="Dependency index / source redirect to a non-registry host — " + reason
+                            + "; pulls packages past the registry's signing and audit (dependency confusion).",
+                        suggested_fix="Remove the redirect; install from the default registry, or pin with --hash."))
+            continue
+        dep = line.split(";", 1)[0].strip()         # drop env marker
+        if " @ " in dep:                            # PEP 508 direct reference
+            name, _, tail = dep.partition(" @ ")
+            name, spec = name.strip(), "@ " + tail.strip()
+        elif re.match(r"(?i)^(?:https?|ftp)://|^git[+@]|^(?:hg|svn|bzr)\+", dep):
+            name, spec = "", dep                    # bare URL / VCS dependency
+        else:
+            mm = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(.*)$", dep)
+            if not mm:
+                continue
+            name, spec = mm.group(1), mm.group(2).strip()
+        reason = _classify_source(spec)
+        if reason:
+            findings.append(Finding(
+                severity="HIGH", rule_id="HI023", file=rel, line=ln,
+                snippet=line[:120],
+                why="Dependency from a non-registry source — " + reason
+                    + "; bypasses the registry's signing/audit and (for git/tarball) runs the fetched package's own build hooks at install.",
+                suggested_fix="Pin to a registry release (name==X.Y.Z), or vendor and audit the source explicitly."))
+        elif not _is_pinned(spec):
+            unpinned.append(name or dep[:30])
+    return findings, unpinned
+
+
+def _supply_pyproject(text, rel):
+    """Section-aware line parse of pyproject.toml — only the dependency tables
+    ([project] dependencies array, [project.optional-dependencies],
+    [tool.poetry.(dev-)dependencies]). [project.urls] and other metadata are
+    ignored, so a Homepage git URL never fires."""
+    findings, unpinned = [], []
+    section = ""
+    in_array = False                                 # inside `dependencies = [ … ]`
+    DEP_SECTIONS = ("project.dependencies-array",)   # synthetic marker for the array
+    def is_dep_section(sec):
+        return (sec in ("tool.poetry.dependencies", "tool.poetry.dev-dependencies")
+                or sec.startswith("project.optional-dependencies"))
+    def handle_dep(name, spec, ln, raw):
+        reason = _classify_source(spec)
+        if reason:
+            findings.append(Finding(
+                severity="HIGH", rule_id="HI023", file=rel, line=ln,
+                snippet=raw[:120],
+                why="Dependency from a non-registry source — " + reason
+                    + "; bypasses the registry's signing/audit and may run build hooks at install.",
+                suggested_fix="Pin to a registry release, or vendor and audit the source."))
+        elif name and not _is_pinned(spec):
+            unpinned.append(name)
+    for ln_no, raw in enumerate(text.splitlines(), start=1):
+        line = re.sub(r"(?:^|\s)#.*$", "", raw).rstrip()
+        st = line.strip()
+        if not st:
+            continue
+        hm = re.match(r"^\[+([^\]]+)\]+\s*$", st)
+        if hm:
+            section, in_array = hm.group(1).strip(), False
+            continue
+        # PEP 621: dependencies = [ "name>=1", ... ]  (possibly multi-line)
+        if section == "project" and re.match(r"^(?:dependencies|optional-dependencies)\b", st):
+            in_array = "[" in st and "]" not in st
+            for item in re.findall(r"\"([^\"]+)\"|'([^']+)'", st):
+                val = item[0] or item[1]
+                name = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)", val)
+                spec = val[name.end():].strip() if name else val
+                handle_dep(name.group(1) if name else "", spec, ln_no, raw)
+            continue
+        if in_array:
+            if "]" in st:
+                in_array = False
+            for item in re.findall(r"\"([^\"]+)\"|'([^']+)'", st):
+                val = item[0] or item[1]
+                name = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)", val)
+                spec = val[name.end():].strip() if name else val
+                handle_dep(name.group(1) if name else "", spec, ln_no, raw)
+            continue
+        # Poetry / optional tables:  name = "^1.2"  or  name = { git = "…" }
+        if is_dep_section(section):
+            km = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(.+)$", st)
+            if not km:
+                continue
+            name, val = km.group(1), km.group(2).strip()
+            if name.lower() == "python":            # poetry's python constraint, not a dep
+                continue
+            if val.startswith("{"):                 # inline table: scan for git/url/path
+                im = re.search(r"(?:git|url)\s*=\s*([\"'][^\"']+[\"'])", val)
+                if im:
+                    handle_dep(name, im.group(1), ln_no, raw)
+                # else: a {version=…, …} table — read version for pinning
+                vm = re.search(r"version\s*=\s*([\"'][^\"']+[\"'])", val)
+                if vm and not _is_pinned(vm.group(1)):
+                    unpinned.append(name)
+            else:
+                handle_dep(name, val, ln_no, raw)
+    return findings, unpinned
+
+
+def _supply_source_scan(text, rel, kind):
+    """Generic off-registry SOURCE scan for the remaining text manifests
+    (yarn.lock, pnpm-lock.yaml, Pipfile, Cargo.toml, Gemfile, go.mod,
+    environment.yml). Flags VCS / off-registry-URL / shorthand sources per line;
+    no ME012 (unpinned) detection for these kinds. Dedups HI023 per host/reason.
+
+    Section-aware for TOML manifests: skips project-METADATA sections
+    ([package], [package.metadata.*], [badges], [workspace.package]) so a crate's
+    repository / homepage / documentation URL — present on nearly every published
+    crate — is not misread as a dependency source. Dependency / [source.*] tables
+    are still scanned. For non-TOML manifests no [section] header matches, so the
+    skip is inert and behavior is unchanged."""
+    findings, seen = [], set()
+    section = ""
+    for ln_no, raw in enumerate(text.splitlines(), start=1):
+        line = re.sub(r"(?:^|\s)#.*$", "", raw)
+        hm = re.match(r"^\s*\[+\s*([^\]]+?)\s*\]+\s*$", line)
+        if hm:
+            section = hm.group(1).strip().strip("\"'").lower()
+            continue
+        if (section == "package" or section.startswith("package.")
+                or section in ("badges", "workspace.package")):
+            continue
+        for m in re.finditer(r"(?i)(?:git\+\S+|(?:https?|ftp)://[^\s\"'#;,)\]]+"
+                             r"|(?:github|gitlab|bitbucket):\S+)", line):
+            reason = _classify_source(m.group(0))
+            if reason and reason not in seen:
+                seen.add(reason)
+                findings.append(Finding(
+                    severity="HIGH", rule_id="HI023", file=rel, line=ln_no,
+                    snippet=raw.strip()[:120],
+                    why="Dependency/lockfile source points off-registry — " + reason
+                        + "; bypasses the registry's signing/audit.",
+                    suggested_fix="Resolve from the registry; remove the git/URL source or vendor & audit it."))
+    return findings
+
+
+def _supply_json_lock(data, rel):
+    """Walk a JSON lockfile (package-lock.json / npm-shrinkwrap.json) for
+    `resolved` / `tarball` URLs that point off-registry. Dedups per host."""
+    findings, seen = [], set()
+    def walk(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k in ("resolved", "tarball", "url") and isinstance(v, str):
+                    reason = _classify_source(v)
+                    if reason:
+                        host = _host_of(v) or reason
+                        if host not in seen:
+                            seen.add(host)
+                            findings.append(Finding(
+                                severity="HIGH", rule_id="HI023", file=rel, line=0,
+                                snippet=(k + ": " + v)[:120],
+                                why="Lockfile resolves a package off-registry — " + reason
+                                    + "; a poisoned `resolved` URL ships attacker code despite a clean top-level manifest.",
+                                suggested_fix="Regenerate the lock against the official registry."))
+                else:
+                    walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+    walk(data)
+    return findings
+
+
+def _supply_package_json(data, path, rel):
+    """CR039 (lifecycle scripts) + HI023/ME012 over the dependency tables."""
+    findings, unpinned = [], []
+    if not isinstance(data, dict):
+        return findings, unpinned
+    scripts = data.get("scripts")
+    if isinstance(scripts, dict):
+        for key in sorted(scripts):
+            val = scripts[key]
+            if key in LIFECYCLE_SCRIPTS and isinstance(val, str) and val.strip():
+                findings.append(Finding(
+                    severity="CRITICAL", rule_id="CR039", file=rel, line=0,
+                    snippet=("scripts." + key + " = " + val)[:120],
+                    why=("Bundled package.json defines an install-lifecycle script (" + key
+                         + ") — the package manager runs it automatically on a plain `npm install`/"
+                         "`npm ci`, with no allowed-tools entry. Presence is the danger, not the "
+                         "command text; a skill is never an npm-installed package."),
+                    suggested_fix="Refuse. Remove the install-lifecycle script; a skill must not run code on dependency install."))
+    for dk in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+        deps = data.get(dk)
+        if not isinstance(deps, dict):
+            continue
+        for name in sorted(deps):
+            spec = deps[name]
+            if not isinstance(spec, str):
+                continue
+            reason = _classify_source(spec)
+            if reason:
+                findings.append(Finding(
+                    severity="HIGH", rule_id="HI023", file=rel, line=0,
+                    snippet=(name + ": " + spec)[:120],
+                    why="npm dependency from a non-registry source — " + reason
+                        + "; bypasses the registry and (for git/tarball) runs the fetched package's lifecycle scripts at install.",
+                    suggested_fix="Pin to a registry version (name: \"X.Y.Z\"); remove the git/URL/shorthand source."))
+            elif not _is_pinned(spec):
+                unpinned.append(name)
+    return findings, unpinned
+
+
+def check_supply_chain(skill_root: Path) -> list[Finding]:
+    """Detect bundled dependency manifests that ship install-lifecycle scripts
+    (CR039), non-registry sources (HI023), or unpinned deps (ME012). Structural,
+    filename-keyed, never executes the file. Emits Findings directly."""
+    findings: list[Finding] = []
+
+    search_dirs = [skill_root] + [skill_root / d for d in SUPPLY_SEARCH_SUBDIRS]
+    candidates: list[Path] = []
+    for d in search_dirs:
+        if d.is_symlink() or not d.is_dir():
+            continue
+        for p in sorted(d.iterdir()):
+            if p.is_symlink() or not p.is_file():
+                continue
+            if p.name in SUPPLY_MANIFEST_NAMES or _is_requirements_txt(p.name):
+                candidates.append(p)
+
+    for path in candidates:
+        rel = path.relative_to(skill_root).as_posix()
+        name = path.name
+        is_lock = name in LOCKFILE_NAMES
+        kind = ("requirements" if _is_requirements_txt(name) else name)
+        unpinned: list[str] = []
+
+        if name in ("package.json", "package-lock.json", "npm-shrinkwrap.json"):
+            data, err = _parse_json(path)
+            if err is not None:
+                # Won't parse — textual backstop for lifecycle scripts.
+                if name == "package.json":
+                    for key in sorted(LIFECYCLE_SCRIPTS):
+                        if _mentions_key(path, key):
+                            findings.append(Finding(
+                                severity="CRITICAL", rule_id="CR039", file=rel, line=0,
+                                snippet='"' + key + '": ...',
+                                why=("Bundled package.json references an install-lifecycle script (" + key
+                                     + ") but won't parse as JSON (" + err + ") — inspect manually; "
+                                     "a lifecycle script runs automatically on `npm install`."),
+                                suggested_fix="Inspect by hand; remove any install-lifecycle script."))
+                continue
+            if name == "package.json":
+                fs, unpinned = _supply_package_json(data, path, rel)
+                findings.extend(fs)
+            else:
+                findings.extend(_supply_json_lock(data, rel))
+        elif _is_requirements_txt(name):
+            text = _read_text_safe(path) or ""
+            fs, unpinned = _supply_requirements(text, rel)
+            findings.extend(fs)
+        elif name == "pyproject.toml":
+            text = _read_text_safe(path) or ""
+            fs, unpinned = _supply_pyproject(text, rel)
+            findings.extend(fs)
+        else:
+            text = _read_text_safe(path) or ""
+            findings.extend(_supply_source_scan(text, rel, kind))
+
+        # ME012 — one aggregated finding per top-level manifest (never a lock).
+        if unpinned and kind in ME012_KINDS and not is_lock:
+            shown = ", ".join(unpinned[:8]) + (" …" if len(unpinned) > 8 else "")
+            findings.append(Finding(
+                severity="MEDIUM", rule_id="ME012", file=rel, line=0,
+                snippet=shown[:160],
+                why=(str(len(unpinned)) + " unpinned dependency(ies) in a bundled manifest ("
+                     + shown + ") — an open specifier (*, latest, bare name, unbounded >=) lets a "
+                     "future malicious release land silently at the next install."),
+                suggested_fix="Pin each to an exact version (name==X.Y.Z / \"X.Y.Z\"), or lock with --hash."))
+
+    return findings
+
+
+# --------------------------------------------------------------------------
 # Python AST pass
 #
 # The regex pass is line-based, so it misses dangerous calls that are aliased
@@ -1321,6 +1803,9 @@ def main() -> int:
 
     # Bundled config / hooks / MCP pass (structural — parses JSON, never executes)
     findings.extend(check_bundled_config(skill_root))
+
+    # Supply-chain pass (structural — bundled dependency manifests; never executes)
+    findings.extend(check_supply_chain(skill_root))
 
     # Per-file pass (regex) + Unicode pass + AST pass for Python files
     for rel in inv["text_files"]:

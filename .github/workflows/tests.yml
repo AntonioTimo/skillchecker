@@ -313,6 +313,60 @@ jobs:
           fi
           echo "::notice::clean-evasion: exit 0 (GREEN) ✓"
 
+      - name: evil-supplychain must exit 3 (RED) with CR039 + HI023 + ME012
+        run: |
+          set +e
+          python3 scripts/scan.py examples/evil-supplychain/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 3 ]; then
+            echo "::error::evil-supplychain should exit 3 (RED), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          python3 <<'PY'
+          import json, sys
+          data = json.load(open("/tmp/out.json"))
+          findings = data["findings"]
+          rules = {f["rule_id"] for f in findings}
+          required = {"CR039": "npm install-lifecycle script", "HI023": "non-registry source", "ME012": "unpinned dependency"}
+          missing = [(k, v) for k, v in required.items() if k not in rules]
+          # Lock specific HI023 variants by snippet — one form breaking silently
+          # while another still fires must not keep CI green.
+          hi023 = "\n".join(f["snippet"] for f in findings if f["rule_id"] == "HI023")
+          variants = {"git+https://github.com/attacker/evil.git": "npm git+ source", "attacker/leftpad": "npm bare user/repo shorthand", "https://attacker.test/art-1.0.0.tgz": "npm off-registry tarball URL", "evil-helper @ git+https": "pip git+ direct reference", "https://malware.example.com/payload-1.0.tar.gz": "pip bare off-registry tarball", "http://packages.attacker.test": "pip non-TLS http source", "--extra-index-url https://pypi.attacker.test": "pip index redirect", "art @ https://attacker.test/art-1.0-py3-none-any.whl": "pyproject off-registry wheel", "resolved \"https://attacker.test": "lockfile resolved off-registry", "git = \"https://github.com/attacker/evil-crate\"": "cargo dependency git source ([package] metadata skipped)"}
+          missing += [(k, v + " [HI023 variant snippet]") for k, v in variants.items() if k not in hi023]
+          # CR039 must catch BOTH preinstall and postinstall.
+          cr039 = "\n".join(f["snippet"] for f in findings if f["rule_id"] == "CR039")
+          for k in ("scripts.preinstall", "scripts.postinstall"):
+              if k not in cr039:
+                  missing.append(("CR039", k + " [lifecycle script snippet]"))
+          # ME012 must fire once per top-level manifest, never on the lock.
+          me012_files = {f["file"] for f in findings if f["rule_id"] == "ME012"}
+          for k in ("package.json", "pyproject.toml", "requirements.txt"):
+              if k not in me012_files:
+                  missing.append(("ME012", k + " [per-manifest aggregate]"))
+          if missing:
+              print("::error::evil-supplychain missing expected catches:")
+              for rule, why in missing:
+                  print(f"  - {rule} ({why})")
+              sys.exit(1)
+          print("evil-supplychain: exit 3 (RED), CR039+HI023+ME012 + variants present OK")
+          PY
+
+      - name: clean-supplychain must exit 0 (GREEN)
+        run: |
+          set +e
+          python3 scripts/scan.py examples/clean-supplychain/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::clean-supplychain should exit 0 (GREEN), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          echo "::notice::clean-supplychain: exit 0 (GREEN) ✓"
+
       - name: Self-audit smoke test (no crash)
         run: |
           # Self-audit IS expected to flag references/*.md (documentation of
