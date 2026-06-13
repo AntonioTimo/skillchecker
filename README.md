@@ -31,7 +31,7 @@ Rules), since `Read`/`Glob`/`Grep` are not themselves path-restricted.
 
 ## What it catches
 
-A non-exhaustive sample of the static rules — **35 CRITICAL**, **18 HIGH**, **10 MEDIUM** regex rules, plus structural config rules (`CR032`–`CR033`, `HI017`–`HI018`, `ME010`, `INV002`), the Python AST pass (`AST001`–`AST008`), and the Unicode pass (`UNI001`–`UNI004`):
+A non-exhaustive sample of the static rules — **36 CRITICAL**, **19 HIGH**, **10 MEDIUM** regex rules, plus the structural bundled-config rules (`CR032`/`CR033` hooks/stdio-MCP, `CR040` bad MCP/hook destination, `HI017`/`HI018`, `ME010`, `INV002`), the supply-chain pass (`CR039`/`HI023`/`ME012`), the Python AST pass (`AST001`–`AST008`), and the Unicode pass (`UNI001`–`UNI004`):
 
 **CRITICAL — refuse, no patch:**
 - Pipe-to-shell (`curl ... | sh`), base64-decoded `eval`/`exec`, dynamic `__import__` with concatenation
@@ -212,10 +212,12 @@ skill-checker/
 ├── examples/             ← paired clean/evil fixtures, each asserted in CI:
 │   ├── clean-skill/ + evil-skill/        ← baseline benign / common attacks
 │   ├── evil-plugin/ + clean-with-data/   ← bundled hooks+MCP / benign config-key data
+│   ├── evil-mcp/ + clean-mcp/            ← bad MCP/hook destination (raw IP / punycode) / benign MCP-catalogue data
 │   ├── evil-ast/ + clean-ast/            ← obfuscated calls / safe Python
 │   ├── evil-unicode/ + clean-unicode/    ← hidden-Unicode injection / bilingual prose
 │   ├── evil-exfil/ + clean-exfil/        ← modern exfil / local-dev URLs
 │   ├── evil-evasion/ + clean-evasion/    ← NFKC / homoglyph / metadata-SSRF / scheme-less IP vs. legit compat + named hosts
+│   ├── evil-supplychain/ + clean-supplychain/ ← bundled-manifest install scripts / non-registry sources vs. pinned registry deps
 │   └── evil-bypass/                      ← regression set for previously-evaded patterns
 └── docs/
     └── HOWTO.md          ← user-facing guide

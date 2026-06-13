@@ -4,6 +4,94 @@ All notable changes to skill-checker.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.7.0] — 2026-06-13
+
+Deepens an existing pass: **MCP / hook destination reputation**.
+`check_bundled_config` (Phase C) flagged the *presence* of a bundled hook
+(`CR032`), stdio MCP (`CR033`), or remote MCP (`HI017`) but never looked at
+*where* it pointed. A lone bundled remote MCP server hardcoded to a bare public IP
+or a punycode host therefore scored 🟡 YELLOW (`HI017` + the per-line `HI019`/
+`HI022`), the same severity as a hygiene nit — a severity false negative on an
+auto-loaded, malware-tier destination (verified: a single bare-IP `.mcp.json`
+server scored exit 1 before this change). The fix unifies the two half-signals —
+"this is an auto-loaded config" and "its host is reputation-bad" — at the
+structural layer.
+
+### Added
+- `scripts/scan.py`: `CR040` (CRITICAL), emitted inside `check_bundled_config`.
+  When a hook `command`, a stdio MCP `command`+`args`, or a remote MCP `url`
+  points at a **public-IP literal** (incl. hex/decimal-encoded) or a **punycode /
+  IDN** host, the bundled-config finding escalates to CRITICAL → 🔴 RED. Host
+  classification **reuses** `_public_ip_in` (the `urllib` + `ipaddress` + `shlex`
+  extractor behind `HI019`) and the `HI022` `xn--` form — no parallel host table.
+  New helpers `_reputation_bad_dest`, `_hook_command_strings`, `_cr040_finding`.
+- `examples/evil-mcp/` — a clean `SKILL.md` shipping a `.mcp.json` with remote MCP
+  servers at a raw public IP, a punycode host, and an encoded IP (each
+  `HI017`+`CR040`), a stdio server with a public IP in `args` (`CR033`+`CR040`), a
+  named-domain server and a loopback server (`HI017` only — discrimination), plus a
+  `.claude/settings.json` hook whose command reaches a public IP (`CR032`+`CR040`).
+- `examples/clean-mcp/` — a `references/mcp-catalog.json` data file documenting MCP
+  servers with `mcpServers`/`url`/`command` keys at **named** hosts; the filename
+  gate keeps it GREEN (the `api-shapes.json` precedent).
+- CI: `evil-mcp` must exit 3 with `CR040` present (+ per-destination-variant
+  snippet asserts + named-domain/loopback discrimination); `clean-mcp` must exit 0
+  with no `CR040`/`CR032`/`CR033`/`HI017` leaking onto the data file.
+- `docs/specs/2026-06-13-mcp-hook-reputation.md`; `references/red-flags.md` row;
+  `references/patch-templates.md` § bundled-config CR040; `THREAT_MODEL.md` rows +
+  acceptable + out-of-scope; `SKILL.md` Step 1.5 row; `docs/ROADMAP.md` → shipped.
+
+### False-positive guards
+- **Filename gate (inherited).** `CR040` runs only inside `check_bundled_config`,
+  which collects candidates by config **basename** — a `references/*.json` data
+  file describing MCP servers (even with a raw-IP value) never reaches it and so is
+  never escalated to CRITICAL (a literal public IP there still earns the per-line
+  `HI019` HIGH, which is correct).
+- **Private / loopback gate.** `_public_ip_in` skips loopback / RFC1918 /
+  link-local, so a local-dev MCP at `http://127.0.0.1:7000/sse` stays `HI017`.
+- **Named-domain discrimination.** A remote MCP at a named host (no IP literal, no
+  `xn--`) stays `HI017` YELLOW — the user reviews the URL and decides.
+- **No double-emit.** Known exfil/tunnel/cloud-metadata hosts are left to
+  `CR026`/`CR034`/`CR038` (already CRITICAL via the line scan); `CR040`'s host gate
+  is IP-literal + punycode only.
+
+### Out of scope (residual, after Phase G)
+MCP `env`/`headers` secret-egress (judgment-heavy FP — promoted to
+`docs/ROADMAP.md` as the next "deepen existing passes" candidate), a full engine
+re-run over extracted hook/MCP command content (`CR032`/`CR033` already route to
+RED — marginal value, double-emit noise), an ordinary named-domain remote MCP
+(stays `HI017` by design — no reputation feed in a no-network scanner), and a
+non-TLS `http://` to a named host (weak signal, FPs on dev servers).
+
+### Fixed (pre-release adversarial review)
+A multi-agent adversarial pass over the new destination extraction found four
+real gaps — all in the **shared** `_candidate_hosts` / `_ip_publicness` engine
+(so the fixes also close the identical hole in `HI019`), each reproduced against
+the live scanner and locked with a fixture form + a CI snippet assert:
+- **Public IPv6 literal in a remote MCP `url` was missed** — the URL-extraction
+  regex excludes `]`, so `http://[2606:4700:4700::1111]/sse` truncated mid-literal
+  and `urlsplit` raised → no host → no `CR040` (a bare-IPv6 MCP read YELLOW). The
+  URL pass now falls back to pulling the bracketed IPv6 literal directly; loopback
+  / ULA / link-local IPv6 still read private (no `CR040`).
+- **Dotted-encoded IPv4 was missed** — `_ip_publicness` only decoded a single hex
+  integer (`0x08080808`) or `\d{8,10}` decimal, so the per-octet forms a real
+  client dials — dotted-hex (`0x08.0x08.0x08.0x08`), dotted-octal (`0250.0.0.1`),
+  mixed — slipped, despite the spec promising "incl. hex/decimal-encoded". A
+  4-octet form with any hex/octal octet now classifies as public (the obfuscation
+  is the signal, the single-integer twin's logic); a plain dotted-decimal is taken
+  by `ipaddress` first and a named host never parses, so no new FPs.
+- **Punycode in a URL path/query/fragment over-flagged (FP)** — `_reputation_bad_dest`
+  ran the `xn--` regex against the whole string, so a benign named host with an
+  `xn--` label in the path (`https://api.example.com/xn--cache/list`) wrongly
+  escalated to CRITICAL (over the ≤5% budget). Both signals (IP **and** punycode)
+  are now classified on the **extracted host(s)** only, mirroring the IP branch —
+  `xn--` in a path no longer fires `CR040` (a genuine punycode **host** still does).
+- **Deferred (recorded, not fixed):** a trailing-dot IP literal (`185.220.101.5.`)
+  and a shell `VAR=ip cmd $VAR` env-assignment/deref in a hook/stdio command — both
+  are attribution-only (the env-assignment case never flips a verdict: `CR032`/
+  `CR033` already route to RED, and the verdict-flipping remote-`url` path is a
+  plain string never shell-parsed). The env-assignment root belongs to the
+  ROADMAP's taint/data-flow shell-walker; both are noted in the spec out-of-scope.
+
 ## [1.6.0] — 2026-06-03
 
 New threat class: **supply-chain** — bundled dependency manifests. The line rules

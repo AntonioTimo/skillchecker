@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "docs-search": {
+      "transport": "http",
+      "url": "https://mcp.example.com/docs/sse",
+      "note": "Remote search server. The user adds this to their own config."
+    },
+    "issue-tracker": {
+      "transport": "http",
+      "url": "https://mcp.example.org/issues/mcp",
+      "note": "Remote tracker. Review the URL before adding it yourself."
+    },
+    "local-notes": {
+      "transport": "stdio",
+      "command": "notes-mcp",
+      "args": ["--root", "~/notes"],
+      "note": "A stdio server the user installs and runs themselves."
+    }
+  }
+}

@@ -367,6 +367,77 @@ jobs:
           fi
           echo "::notice::clean-supplychain: exit 0 (GREEN) ✓"
 
+      - name: evil-mcp must exit 3 (RED) with CR040 (destination reputation)
+        run: |
+          set +e
+          python3 scripts/scan.py examples/evil-mcp/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 3 ]; then
+            echo "::error::evil-mcp should exit 3 (RED), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          python3 <<'PY'
+          import json, sys
+          data = json.load(open("/tmp/out.json"))
+          findings = data["findings"]
+          rules = {f["rule_id"] for f in findings}
+          required = {"CR040": "bundled MCP/hook destination reputation", "CR032": "bundled hook presence", "HI017": "remote MCP presence"}
+          missing = [(k, v) for k, v in required.items() if k not in rules]
+          # Lock each CR040 destination form by snippet — one form breaking silently
+          # while another still fires must not keep CI green.
+          cr040 = "\n".join(f["snippet"] for f in findings if f["rule_id"] == "CR040")
+          variants = {
+              "185.220.101.5": "remote MCP url -> raw public IP (the verdict-flip case)",
+              "xn--80ak6aa92e": "remote MCP url -> punycode / IDN homoglyph host",
+              "0x08080808": "remote MCP url -> single hex-encoded IP host",
+              "2606:4700:4700::1111": "remote MCP url -> public IPv6 literal (bracketed authority)",
+              "0x08.0x08.0x08.0x08": "remote MCP url -> dotted-hex encoded IPv4",
+              "0250.0.0.1": "remote MCP url -> dotted-octal encoded IPv4",
+              "45.83.122.10": "stdio MCP command+args -> public IP in args",
+              "93.184.216.34": "hook command -> public IP",
+          }
+          missing += [(k, v + " [CR040 variant snippet]") for k, v in variants.items() if k not in cr040]
+          # Discrimination: these must carry HI017 (and a per-line HI022 for the
+          # punycode-in-path case) but NEVER CR040 — named domain, IPv4/IPv6
+          # loopback, a public IP that sits in the URL PATH not the host, and an
+          # xn-- label in the path not the host.
+          for benign in ("mcp.example.com", "127.0.0.1", "[::1]", "relay/8.8.8.8", "xn--cache"):
+              if benign in cr040:
+                  missing.append(("CR040", benign + " must NOT be escalated (host-gated discrimination)"))
+          if missing:
+              print("::error::evil-mcp missing/incorrect catches:")
+              for rule, why in missing:
+                  print(f"  - {rule} ({why})")
+              sys.exit(1)
+          print("evil-mcp: exit 3 (RED), CR040 + all destination variants + discrimination OK")
+          PY
+
+      - name: clean-mcp must exit 0 (GREEN)
+        run: |
+          set +e
+          python3 scripts/scan.py examples/clean-mcp/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::clean-mcp should exit 0 (GREEN), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          python3 <<'PY'
+          import json, sys
+          data = json.load(open("/tmp/out.json"))
+          rules = {f["rule_id"] for f in data["findings"]}
+          # A references/*.json catalogue with mcpServers/url/command keys (named hosts)
+          # must stay GREEN — the filename gate keeps the structural rules off it.
+          leaked = {"CR040", "CR032", "CR033", "HI017"} & rules
+          if leaked:
+              print("::error::clean-mcp leaked structural findings on a data file:", sorted(leaked))
+              sys.exit(1)
+          print("clean-mcp: exit 0 (GREEN), no CR040/CR032/CR033/HI017 on the data file ✓")
+          PY
+
       - name: Self-audit smoke test (no crash)
         run: |
           # Self-audit IS expected to flag references/*.md (documentation of
