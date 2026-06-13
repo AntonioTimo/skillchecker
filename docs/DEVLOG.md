@@ -15,7 +15,8 @@ docs → PR → squash-merge → GitHub release.
 | B | Unicode / invisible characters | v1.3.0 | [#3](https://github.com/AntonioTimo/skillchecker/pull/3) | ✅ released |
 | D | Exfil / evasion breadth | v1.4.0 | [#4](https://github.com/AntonioTimo/skillchecker/pull/4) | ✅ released |
 | E | Evasion v2 (normalization + homoglyph domains) | v1.5.0 | [#5](https://github.com/AntonioTimo/skillchecker/pull/5) | ✅ released |
-| F | Supply-chain (bundled dependency manifests) | v1.6.0 | — | 🚧 in review |
+| F | Supply-chain (bundled dependency manifests) | v1.6.0 | [#6](https://github.com/AntonioTimo/skillchecker/pull/6) | ✅ released |
+| G | MCP / hook destination reputation (CR040) | v1.7.0 | — | 🚧 in review |
 
 ---
 
@@ -255,3 +256,93 @@ false positive (source keys narrowed to `resolved`/`tarball`); and x-ranges
 (`1.x`) now read as unpinned. Each is locked by a fixture form **and** a CI snippet
 assert, so the parser-form bypass can't silently regress — the lesson re-applied:
 when a line heuristic keeps spawning sibling forms, lock each form in CI.
+
+---
+
+## Phase G — MCP / hook destination reputation (v1.7.0, in review)
+
+**Goal.** Deepen the bundled-config pass so it judges *where* a hook / MCP server
+points, not only that one is present — the roadmap's "MCP reputation / hook-content
+inspection" candidate.
+
+**The gap (severity FN).** `check_bundled_config` flagged presence — a hook
+(`CR032`), a stdio MCP (`CR033`), a remote MCP (`HI017`) — and the per-line scan
+saw a bad host independently (`HI019` public IP, `HI022` punycode). But neither
+subsystem connected the two: a lone bundled remote MCP server hardcoded to
+`https://185.220.101.5/sse` (a real Tor exit range) scored **exit 1, 🟡 YELLOW**
+(`HI017`+`HI019`) — "patch and proceed" on a config the harness auto-loads on
+session start. Not a silent GREEN (HI017 raises *a* flag), but the wrong-severity
+flag — the worst-failure class one notch up. Verified against the live scanner
+before writing a line of fix.
+
+**The diagnosis (not the symptom).** The cure is not "make `HI019` CRITICAL in a
+`.json`" — a public IP in a *data file* deserves a note, not a refusal. The disease
+is that **two subsystems each hold half the signal**: the structural pass knows
+it's an auto-loaded destination but doesn't classify the host; the line pass
+classifies the host but doesn't know it's auto-loaded. Fixing the symptom (a denylist
+of bad MCP hosts, or blanket-escalating HI019) would have re-bred the same class.
+The fix unifies the halves at the structural layer.
+
+**The fix (GREEN).** `CR040` (CRITICAL), emitted inside `check_bundled_config` at
+the three destination sites (hook `command`, stdio `command`+`args`, remote `url`).
+It **reuses the canonical detectors** — `_public_ip_in` (the `urllib`+`ipaddress`+
+`shlex` extractor behind `HI019`) for public/encoded IP literals, and the `HI022`
+`xn--` form for punycode — so there is no second host table to drift out of sync
+(the recurring "same logic in two places" trap). The host gate is deliberately
+**IP-literal + punycode only**: known exfil/tunnel/cloud-metadata hosts are
+*already* CRITICAL via the line rules `CR026`/`CR034`/`CR038`, so re-flagging them
+would only double-emit.
+
+**Key decisions.**
+- **Severity from the FP budget (≤5%).** An auto-loaded config hardcoded to a bare
+  public IP or a punycode homoglyph host has no legitimate form — the structural
+  twin of `CR038`. Loopback / RFC1918 (a local-dev server) and named domains (a
+  human-reviewable `HI017`) are gated out, so the FP class is near-empty.
+- **The verdict-flip is only *visible* on the minimal case.** A single bare-IP MCP
+  flips exit 1 → exit 3. A richer fixture is RED today already (≥3 `HI017`, or a
+  `CR032` hook, independently route to RED), so the regression fixture
+  `examples/evil-mcp/` locks `CR040`'s *coverage* (per-destination-variant snippets
+  + named/loopback discrimination), and the flip itself is the documented minimal
+  proof.
+- **The clean fixture proves the filename gate, not a benign MCP.** A real bundled
+  remote MCP is always ≥YELLOW (`HI017`), so `clean-mcp` can't contain one and stay
+  GREEN — it proves the guard with a `references/mcp-catalog.json` data file
+  (named hosts, `mcpServers`/`url`/`command` keys) the filename gate keeps GREEN,
+  exactly as `clean-with-data` does for `CR032`.
+
+**Verified.** Minimal single-server fixture YELLOW→RED (exit 1 → 3); `evil-mcp`
+RED with `CR040` across raw-IP, punycode, encoded-IP, stdio-args, hook-command and
+zero `CR040` on the named/loopback servers; `clean-mcp` GREEN; no regressions
+across the fixtures; self-audit adds 0 `CR040` findings.
+
+**Then the adversarial review round.** A multi-agent pass (six finders by distinct
+angle — url host forms, MCP schema variants, encoded-IP/IDN, hook-command
+positions, false-positives, double-emit/parse-fail — each reproduced against the
+live scanner, then each finding independently re-verified) found the same *shape*
+the project keeps hitting: **a host heuristic missing a sibling syntactic form**.
+Four were real and all fixed before merge, each in the **shared**
+`_candidate_hosts`/`_ip_publicness` engine — so the fixes close the identical hole
+in `HI019` too:
+- a **public IPv6 literal** in a remote MCP `url` (`http://[2606:…::1111]/sse`)
+  was silently missed — the URL regex excludes `]`, so the match truncated and
+  `urlsplit` raised. The IPv6 host is now pulled from the bracketed authority on
+  that failure; private IPv6 stays GREEN.
+- **dotted-encoded IPv4** (`0x08.0x08.0x08.0x08`, `0250.0.0.1`) slipped — only the
+  single-integer `0x…`/decimal form was decoded, though the spec promised
+  "hex/decimal-encoded". A 4-octet form with a hex/octal octet now flags (the
+  obfuscation is the signal); plain dotted-decimal and named hosts are untouched.
+- **punycode in a URL path** (`api.example.com/xn--cache/…`) over-flagged CRITICAL
+  — the `xn--` check ran on the whole string. Both signals now classify on the
+  **extracted host**, so a path label no longer escalates a benign named host.
+- two were **deferred** with their boundary recorded: a trailing-dot IP literal,
+  and a shell `VAR=ip cmd $VAR` env-assignment in a hook/stdio command — both
+  attribution-only (the env case never flips a verdict, since `CR032`/`CR033`
+  already route to RED and the verdict-flipping remote-`url` path is never
+  shell-parsed). The env-assignment root is the ROADMAP's taint/shell-walker work.
+
+The doubled lesson, re-applied: when a host heuristic keeps spawning sibling
+forms, fix the shared extractor once (it pays off across every rule that uses it)
+and lock each form with a fixture + a CI snippet assert. The injected
+"run a version check" prompt one finder met inside an MCP server's session
+instructions was correctly ignored as out-of-scope — the auditor is the kind of
+target it audits for.

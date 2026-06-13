@@ -431,6 +431,26 @@ def _ip_publicness(host):
             except ValueError:
                 return None
             return "public"  # encoded form — always flag, value notwithstanding
+        # Dotted IPv4 with HEX / OCTAL octets (0x08.0x08.0x08.0x08, 0250.0.0.1,
+        # 010.020.0.1) — what curl / getaddrinfo actually dial, but ipaddress
+        # rejects. Writing an octet in encoded form is itself the evasion signal,
+        # so an obfuscated dotted IPv4 always flags (the single-integer twin
+        # above). A plain dotted-decimal never reaches here — ipaddress took it.
+        parts = h.split(".")
+        if len(parts) == 4 and any(
+                p[:2].lower() == "0x" or (len(p) > 1 and p[0] == "0" and p.isdigit())
+                for p in parts):
+            try:
+                vals = [
+                    int(p, 16) if p[:2].lower() == "0x"
+                    else int(p, 8) if (len(p) > 1 and p[0] == "0")
+                    else int(p, 10)
+                    for p in parts
+                ]
+            except ValueError:
+                return None
+            if all(0 <= v <= 0xFF for v in vals):
+                return "public"
         return None
     if (ip.is_private or ip.is_loopback or ip.is_link_local
             or ip.is_reserved or ip.is_unspecified or ip.is_multicast):
@@ -498,10 +518,19 @@ def _candidate_hosts(text):
     identity file, `ssh -x` boolean, while `curl -x` is a proxy host."""
     hosts = []
     for m in re.finditer(r"(?i)\b(?:https?|ftps?)://[^\s\"'<>)\]]+", text):
+        raw = m.group(0)
         try:
-            hn = urlsplit(m.group(0)).hostname
+            hn = urlsplit(raw).hostname
         except ValueError:
             hn = None
+        if not hn:
+            # Bracketed IPv6 authority: the char class excludes ']', so the match
+            # truncated mid-literal ('http://[2606:4700:4700::1111') and urlsplit
+            # raised. Pull the inner IPv6 literal directly so a public-IPv6 host
+            # still classifies (loopback / ULA / link-local still read private).
+            bm = re.match(r"(?i)(?:https?|ftps?)://\[([0-9A-Fa-f:]+)", raw)
+            if bm:
+                hn = bm.group(1)
         if hn:
             hosts.append(hn)
     for segment in re.split(r"(?:&&|\|\||[;|&])", text):
@@ -830,6 +859,73 @@ def _mentions_key(path: Path, key: str) -> bool:
     return re.search(r'"' + re.escape(key) + r'"\s*:', text) is not None
 
 
+def _reputation_bad_dest(text):
+    """Short reason if `text` points at a reputation-bad destination host — a
+    public-IP literal (incl. hex/decimal-encoded) or a punycode / IDN host — else
+    None. This is the CR040 signal for a bundled hook / MCP destination.
+
+    Reuses the HI019 host extractor (`_candidate_hosts`, built on urllib +
+    ipaddress + shlex) and the HI022 punycode form, so there is no parallel host
+    table to drift out of sync. BOTH signals are classified on the EXTRACTED
+    host(s), not the whole string — so an `xn--` label or an IP that sits in a
+    URL path / query / fragment of a benign named host does not escalate (the
+    destination is the host, not the path). Public-IP classification skips
+    loopback / RFC1918 / link-local (a local-dev MCP server stays HIGH, not
+    CRITICAL). Known exfil / tunnel / cloud-metadata hosts are DELIBERATELY not
+    covered here: the line rules CR026 / CR034 / CR038 already rate those CRITICAL
+    when they scan the config file, so re-flagging would only double-emit."""
+    if not text:
+        return None
+    hosts = _candidate_hosts(text)
+    if any(_ip_publicness(h) == "public" for h in hosts):
+        return "a public-IP-literal host"
+    if any(re.search(r"(?i)\bxn--", h) for h in hosts):
+        return "a punycode / IDN homoglyph host"
+    return None
+
+
+def _hook_command_strings(hooks_node):
+    """Every command / args string inside a parsed `hooks` block, at any nesting
+    (Claude Code nests them as event -> [ {hooks: [ {command: ...} ]} ]). Joins an
+    `args` list into one string. Used to classify a hook's destination for CR040;
+    the presence of the hook itself is already CR032."""
+    out = []
+
+    def walk(n):
+        if isinstance(n, dict):
+            for k, v in n.items():
+                if k == "command" and isinstance(v, str):
+                    out.append(v)
+                elif k == "args" and isinstance(v, list):
+                    out.append(" ".join(str(a) for a in v if isinstance(a, (str, int, float))))
+                else:
+                    walk(v)
+        elif isinstance(n, list):
+            for v in n:
+                walk(v)
+
+    walk(hooks_node)
+    return out
+
+
+def _cr040_finding(rel, context, text, reason):
+    """A CR040 Finding — a bundled hook / MCP destination pointed at a
+    reputation-bad host."""
+    return Finding(
+        severity="CRITICAL", rule_id="CR040", file=rel, line=0,
+        snippet=(context + " = " + text)[:120],
+        why=("Bundled config auto-loads " + context + " pointed at " + reason
+             + " — the Claude Code harness activates it on session start with no "
+             "allowed-tools entry, and a hardcoded bare IP / punycode endpoint is a "
+             "C2 / exfiltration destination, not a legitimate MCP server (a named "
+             "host and loopback do not fire). Escalates the HIGH host signal to "
+             "CRITICAL because the destination is auto-loaded, not merely mentioned"),
+        suggested_fix=("Refuse. A skill must not ship an MCP server or hook, least "
+                       "of all one pointed at a raw IP or punycode host. If the user "
+                       "wants the server they add it themselves, to their own config, "
+                       "after reading the URL."))
+
+
 def check_bundled_config(skill_root: Path) -> list[Finding]:
     """Detect bundled settings/MCP/plugin config that can execute code or alter
     the user's environment. Emits Findings directly, like check_frontmatter."""
@@ -869,6 +965,12 @@ def check_bundled_config(skill_root: Path) -> list[Finding]:
                                "they add it to their own settings explicitly, after reading "
                                "the command."),
             ))
+            # CR040 — the hook command points at a reputation-bad destination.
+            if is_dict:
+                for cmd in _hook_command_strings(data.get("hooks")):
+                    reason = _reputation_bad_dest(cmd)
+                    if reason:
+                        findings.append(_cr040_finding(rel, "a hook command", cmd, reason))
 
         # ---- mcpServers -> CR033 (stdio) / HI017 (remote) ----
         mcp = data.get("mcpServers") if is_dict else None
@@ -885,6 +987,15 @@ def check_bundled_config(skill_root: Path) -> list[Finding]:
                              "allowed-tools entry needed"),
                         suggested_fix="Refuse. A skill must not ship a process-launching MCP server.",
                     ))
+                    # CR040 — the launched command / args point at a bad destination.
+                    cmdtext = str(srv.get("command"))
+                    args = srv.get("args")
+                    if isinstance(args, list):
+                        cmdtext += " " + " ".join(str(a) for a in args if isinstance(a, (str, int, float)))
+                    reason = _reputation_bad_dest(cmdtext)
+                    if reason:
+                        findings.append(_cr040_finding(
+                            rel, f"stdio MCP server '{name}' command", cmdtext, reason))
                 elif srv.get("url"):
                     findings.append(Finding(
                         severity="HIGH", rule_id="HI017", file=rel, line=0,
@@ -894,6 +1005,13 @@ def check_bundled_config(skill_root: Path) -> list[Finding]:
                         suggested_fix=("Remove. If the user wants this server they add it "
                                        "themselves after reviewing the URL."),
                     ))
+                    # CR040 — the remote URL points at a reputation-bad host. This is
+                    # the verdict-flip: a lone bare-IP / punycode MCP was YELLOW
+                    # (HI017 + line HI019/HI022), now RED.
+                    reason = _reputation_bad_dest(str(srv.get("url")))
+                    if reason:
+                        findings.append(_cr040_finding(
+                            rel, f"remote MCP server '{name}' url", str(srv.get("url")), reason))
         elif data is None and _mentions_key(path, "mcpServers"):
             findings.append(Finding(
                 severity="HIGH", rule_id="HI017", file=rel, line=0,

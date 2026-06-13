@@ -136,6 +136,7 @@ never executes) and emits:
 |---|---|---|
 | `CR032` | bundled `hooks` block | CRITICAL → RED |
 | `CR033` | stdio `mcpServers` (`command`) | CRITICAL → RED |
+| `CR040` | bundled hook/MCP destination (hook `command`, stdio `command`+`args`, remote `url`) on a **public-IP literal** (incl. encoded) or **punycode/IDN** host | CRITICAL → RED |
 | `HI017` | remote `mcpServers` (`url`) | HIGH |
 | `HI018` | `permissions` allow-list / mode broadening | HIGH |
 | `ME010` | benign bundled `settings.json` | MEDIUM |
@@ -147,6 +148,17 @@ skill* is still RCE — the author controls that script. Refuse. A `HI017` remot
 never the skill's — recommend removal and let the user add it themselves. The
 presence of *any* `hooks` block is disqualifying regardless of what the command
 appears to do — presence, not contents, is the threat.
+
+**`CR040` — destination reputation.** Once the destination is extracted
+structurally, it is also classified. A bundled hook/MCP pointed at a **public-IP
+literal** (incl. hex/decimal-encoded) or a **punycode/IDN** host is `CR040`
+CRITICAL → RED: an auto-loaded config aimed at a bare IP or homoglyph host is a
+C2 / exfil endpoint, not a legitimate server. This is the severity fix for the
+common one-server attack — a lone remote MCP at a raw IP used to read 🟡 YELLOW
+(`HI017` + the per-line `HI019`). A **named** domain (`https://mcp.vendor.com`)
+and a **loopback / private** host are *not* escalated — they stay `HI017` for you
+to review. Known tunnel/exfil/cloud-metadata hosts are already CRITICAL via
+`CR026`/`CR034`/`CR038`, so `CR040` does not re-flag them.
 
 **The trap this closes:** a skill whose `SKILL.md` is spotlessly clean can still
 own the machine through a one-line `.claude/settings.json` hook. The line-based

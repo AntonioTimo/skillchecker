@@ -15,6 +15,7 @@ out of scope" item or a spec "Non-goals" line.
 | D | Exfil / evasion breadth + code-review hardening | 1.4.0 |
 | E | Evasion v2: NFKC normalization + homoglyph domains | 1.5.0 |
 | F | Supply-chain: bundled dependency manifests | 1.6.0 |
+| G | MCP / hook destination reputation (`CR040`) | 1.7.0 |
 
 ## v3 candidates
 
@@ -30,7 +31,19 @@ out of scope" item or a spec "Non-goals" line.
 - **JS / TS AST pass:** a real parser for JS like `ast` is for Python. *Source:
   spec A.* Blocked on a dependency-free JS parser (the scanner ships no deps,
   makes no network calls).
-- **MCP reputation / hook-content inspection.** *Source: spec C.*
+- **MCP / hook destination reputation (✅ shipped in v1.7.0):** `CR040` escalates
+  a bundled hook / MCP destination (hook `command`, stdio `command`+`args`, remote
+  `url`) pointed at a public-IP literal or punycode/IDN host to CRITICAL — the
+  severity gap where a lone bare-IP / punycode MCP read YELLOW. Reuses
+  `_public_ip_in` / `HI022`; keyed off config filenames. *Source: spec C.* Residual
+  out of scope: MCP `env`/`headers` secret-egress, full engine re-run over hook
+  command content, ordinary named-domain MCP reputation (no network feed).
+- **MCP `env` / `headers` secret-egress.** A bundled MCP server config that injects
+  a credential reference (`"env": {"TOKEN": "${ANTHROPIC_API_KEY}"}`, an
+  `Authorization` header) forwards the user's secrets to a third party. *Source:
+  Phase G spec out-of-scope #1.* Judgment-heavy on FP (env/headers are how MCP
+  servers legitimately auth to their own service) — needs a narrow signal
+  (shell-style interpolation / credential-shaped var names) to stay in budget.
 
 ### New threat classes
 - **Supply-chain (✅ shipped in v1.6.0):** a structural pass over bundled
