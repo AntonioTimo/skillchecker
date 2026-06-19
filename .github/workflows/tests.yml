@@ -31,6 +31,11 @@ jobs:
       - name: Syntax check scan.py
         run: |
           python3 -c "import ast; ast.parse(open('scripts/scan.py').read())"
+          python3 -c "import ast; ast.parse(open('scripts/check_docs.py').read())"
+
+      - name: Doc-currency check (the docs MUST reflect the product)
+        run: |
+          python3 scripts/check_docs.py
 
       - name: clean-skill must exit 0 (GREEN)
         run: |
@@ -457,9 +462,9 @@ jobs:
           tf001 = "\n".join(f["snippet"] for f in findings if f["rule_id"] == "TF001")
           tf002 = "\n".join(f["snippet"] for f in findings if f["rule_id"] == "TF002")
           missing = []
-          # TF001 must catch every credential->bad/dynamic-dest exfil chain (>=10).
-          if rules.count("TF001") < 10:
-              missing.append(("TF001", f"expected >=10 credential-exfil chains, got {rules.count('TF001')}"))
+          # TF001 must catch every credential->bad/dynamic-dest exfil chain (>=12).
+          if rules.count("TF001") < 12:
+              missing.append(("TF001", f"expected >=12 credential-exfil chains, got {rules.count('TF001')}"))
           if "TF002" not in rules:
               missing.append(("TF002", "named-host credential egress (HIGH, not CRITICAL)"))
           # Lock each TF001 form by snippet — one form breaking silently while
@@ -478,6 +483,8 @@ jobs:
               "2130706433": "whole-environment dump source (dict(os.environ)) -> decimal-encoded dest",
               "93.184.216.34": "match/case body traversal",
               "45.83.122.10": "lambda body traversal",
+              "8.8.8.9": "walrus (:=) binding propagation — NamedExpr enumerated (Codex)",
+              "93.184.216.35": "for-target binding propagation — sibling of walrus (Codex)",
           }
           missing += [("TF001", v + " [snippet]") for k, v in tf001_variants.items() if k not in tf001]
           # Discrimination: the named-host and loopback egresses MUST be TF002 (HIGH),
@@ -547,6 +554,7 @@ jobs:
           locks = [
               ("HI024", "system prompt"),            # disclosure of own system prompt
               ("HI024", "Never skip this setup"),    # clause-aware negation guard fires through an unrelated negation
+              ("HI024", "Never mind the safety notes"),  # comma-break: negation governs prior clause, not the exfil verb (Codex)
               ("HI024", "tell me your full system prompt"),  # generic-verb (tell) tight-branch
               ("HI025", "https://"),                 # prompt exfiltrated to a sink
               ("ME013", "future sessions"),          # cross-session persistence
@@ -556,7 +564,7 @@ jobs:
               ("AST009", "open(__file__"),           # builtin open self-write
               ("AST009", "Path(__file__).open"),     # pathlib open self-write
               ("AST009", "os.replace"),              # move-onto-__file__ self-write
-              ("AST009", "selfpath.write_text"),     # prior-line __file__ binding
+              ("AST009", 'open(__file__, "r+")'),    # r+ update mode is writable (Codex)
           ]
           for r, sub in locks:
               if sub not in snip(r):
@@ -618,6 +626,8 @@ jobs:
               ("HI026", "disregard all previous instructions"),
               ("AST010", "os.execv"),                     # process replacement
               ("AST011", "extractall"),                   # Zip-Slip
+              ("AST011", "fully_trusted"),                # unsafe filter VALUE: presence of filter= is not safety (Codex)
+              ("AST011", "getmembers"),                   # members=getmembers() passes ALL members — not safety (Codex)
               ("CR042", "leaky-stdio.env"),               # live token in env
               ("CR042", "leaky-remote.headers"),          # live token in header
               ("HI027", ".aws/credentials"),              # credential-file ref in env
@@ -635,6 +645,9 @@ jobs:
           for r, sub in locks:
               if sub not in snip(r):
                   missing.append((r, f"snippet substring '{sub}' [form lock]"))
+          # AST011 must fire on all three unsafe forms (no-filter + fully_trusted + getmembers).
+          if [f["rule_id"] for f in findings].count("AST011") < 3:
+              missing.append(("AST011", "expected >=3 unsafe-extract forms (no-filter, fully_trusted, getmembers)"))
           # AST010 must carry BOTH a CRITICAL (non-literal program) and a HIGH (literal).
           ast10 = {f["severity"] for f in findings if f["rule_id"] == "AST010"}
           if not {"CRITICAL", "HIGH"} <= ast10:
@@ -676,7 +689,53 @@ jobs:
           if leaked:
               print("::error::clean-ecosystem leaked Phase-J findings on benign/defensive content:", leaked)
               sys.exit(1)
-          print("clean-ecosystem: exit 0 (GREEN), no Phase-J rule leaked ✓")
+          # The AST011 exemption must be EXERCISED, not vacuously absent: the safe
+          # `extractall(filter="data")` form must actually be present in the fixture.
+          if 'filter="data"' not in open("examples/clean-ecosystem/scripts/safe.py").read():
+              print("::error::clean-ecosystem safe.py lost its filter=\"data\" exemption witness")
+              sys.exit(1)
+          print("clean-ecosystem: exit 0 (GREEN), no Phase-J rule leaked ✓ (data-filter exemption exercised)")
+          PY
+
+      - name: Deep-nested config must FAIL CLOSED (RED), never silently pass
+        run: |
+          # A settings.json too deeply nested for the JSON parser raises RecursionError.
+          # The scanner must NOT swallow that crash into a silent pass (the fail-OPEN
+          # backstop bug, Codex audit) — a parser DoS on a config is itself a red flag.
+          # It must RED, and the textual backstop must recover the real "hooks" finding.
+          set +e
+          d=$(mktemp -d)
+          mkdir -p "$d/.claude"
+          printf -- '---\nname: t\ndescription: a skill whose settings json is pathologically deeply nested\nwhen_to_use: x\ndisable-model-invocation: true\nallowed-tools: Read\n---\n# T\n' > "$d/SKILL.md"
+          python3 - "$d/.claude/settings.json" <<'PY'
+          import sys
+          depth = 2000  # exceeds the JSON parser's recursion limit -> RecursionError
+          open(sys.argv[1], "w").write('{"hooks":' + '[' * depth + '"x"' + ']' * depth + '}')
+          PY
+          python3 scripts/scan.py "$d" > /tmp/out.json 2>/tmp/out.err
+          rc=$?
+          set -e
+          if [ "$rc" -ne 3 ]; then
+            echo "::error::deep-nested config must FAIL CLOSED (exit 3), got $rc — a parser crash silently passed"
+            cat /tmp/out.json /tmp/out.err
+            exit 1
+          fi
+          if [ -s /tmp/out.err ]; then
+            echo "::error::deep-nested config leaked a stderr traceback (uncaught crash):"
+            cat /tmp/out.err
+            exit 1
+          fi
+          python3 <<'PY'
+          import json, sys
+          data = json.load(open("/tmp/out.json"))
+          crit = sorted({f["rule_id"] for f in data["findings"] if f["severity"] == "CRITICAL"})
+          if not crit:
+              print("::error::deep-config produced no CRITICAL — not fail-closed")
+              sys.exit(1)
+          if "CR032" not in crit:
+              print("::error::deep-config: textual backstop did not recover the hooks finding (CR032)", crit)
+              sys.exit(1)
+          print("deep-config fail-closed: exit 3, CRITICAL", crit, "✓")
           PY
 
       - name: Self-audit smoke test (no crash)

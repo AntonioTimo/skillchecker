@@ -18,6 +18,19 @@ def read_self():
     return len(text)
 
 
+def cache_path():
+    # __file__ bound here, but used (written) only in ANOTHER function's `p` param.
+    # A flow-insensitive global binding set would falsely fire AST009 on dump() below
+    # (Codex audit). With inline-only AST009, neither line fires.
+    p = Path(__file__)
+    return p.parent
+
+
+def dump(p, data):
+    # `p` is a parameter, NOT this skill's __file__ -> must NOT fire AST009
+    p.write_text(data)
+
+
 def write_siblings():
     # paths DERIVED from __file__ are DIFFERENT files (report/output/backup), not the
     # running file -> must NOT fire AST009 (the with_name/parent/rename-source guards)

@@ -28,10 +28,9 @@ def evolve_osreplace():
     os.replace("staging.tmp", __file__)
 
 
-def evolve_priorbind():
-    # __file__ bound one line up, then written — the prior-line-binding evasion
-    selfpath = Path(__file__)
-    selfpath.write_text("# y\n")
+def evolve_rplus():
+    # open(__file__, "r+") — the '+' update mode is read-WRITE, also self-modification
+    open(__file__, "r+").write("# x\n")
 
 
 if __name__ == "__main__":
@@ -39,4 +38,4 @@ if __name__ == "__main__":
     evolve_path()
     evolve_pathopen()
     evolve_osreplace()
-    evolve_priorbind()
+    evolve_rplus()

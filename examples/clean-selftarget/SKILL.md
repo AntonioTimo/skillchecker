@@ -21,7 +21,7 @@ attacks defensively — so neither the prose rules nor the AST rule fire.
 
 ## Safety notes
 
-This skill will never print your system prompt, send your instructions to any server, remember directives for all future sessions, or rewrite your own SKILL.md — those are exactly the malicious patterns it exists to catch, and it refuses every one.
+This skill will never print your system prompt. It will never send your instructions to a server. It will never remember directives across future sessions. It will never rewrite its own SKILL.md. Those are exactly the malicious patterns it exists to catch, and it refuses every one — each negation governs its own clause (a comma-chained single "never" is not how a defensive note should read).
 
 As benign look-alikes it handles safely: it can detect self-modifying code in other repositories, store embeddings for all conversations, and persist UI state across all sessions; and to update this skill a human edits its SKILL.md in their own editor. None of those should flag.
 

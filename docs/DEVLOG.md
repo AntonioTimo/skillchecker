@@ -19,7 +19,8 @@ docs → PR → squash-merge → GitHub release.
 | G | MCP / hook destination reputation (CR040) | v1.7.0 | [#8](https://github.com/AntonioTimo/skillchecker/pull/8) | ✅ released |
 | H | Taint / data-flow: credential → network exfil (TF001/TF002) | v1.8.0 | [#9](https://github.com/AntonioTimo/skillchecker/pull/9) | ✅ released |
 | I | Self-targeting prose + self-modification + activation-surface (borrow-from-SkillSpector) | v1.9.0 | [#10](https://github.com/AntonioTimo/skillchecker/pull/10) | ✅ released |
-| J | Ecosystem hardening (2026 supply-chain + prompt-injection + MCP secret-egress) | v1.10.0 | — | 🚧 in review |
+| J | Ecosystem hardening (2026 supply-chain + prompt-injection + MCP secret-egress) | v1.10.0 | [#11](https://github.com/AntonioTimo/skillchecker/pull/11) | ✅ released |
+| — | Adversarial-audit hardening (Codex): fail-closed + prose/taint/AST fixes + doc-currency gate | v1.10.1 | (PR pending) | 🔧 committed, pre-merge |
 
 ---
 
@@ -138,7 +139,7 @@ bypass that reads as 🟢). The review caught four of them before they shipped.
 
 ---
 
-## Phase E — Evasion v2 (v1.5.0, in review) · first v3 increment
+## Phase E — Evasion v2 (v1.5.0, released) · first v3 increment
 
 **Goal.** Close evasion that survives v2: Unicode-normalization tricks and homoglyph domains.
 
@@ -190,7 +191,7 @@ supply-chain, …).
 
 ---
 
-## Phase F — Supply-chain (bundled dependency manifests) (v1.6.0, in review)
+## Phase F — Supply-chain (bundled dependency manifests) (v1.6.0, released)
 
 **Goal.** Catch the supply-chain vectors a skill can ship in a *dependency
 manifest* — the roadmap's named "New threat class".
@@ -262,7 +263,7 @@ when a line heuristic keeps spawning sibling forms, lock each form in CI.
 
 ---
 
-## Phase G — MCP / hook destination reputation (v1.7.0, in review)
+## Phase G — MCP / hook destination reputation (v1.7.0, released)
 
 **Goal.** Deepen the bundled-config pass so it judges *where* a hook / MCP server
 points, not only that one is present — the roadmap's "MCP reputation / hook-content
@@ -555,3 +556,43 @@ hand-written regex over a structured surface (word order, token shapes, an arg i
 spawns sibling forms — reproduce each against the live scanner, fix the root, lock
 the form. And a *crash* is worse than a missed finding: never let one pass abort the
 scan.
+
+---
+
+## v1.10.1 — Adversarial-audit hardening (Codex)
+
+**Goal.** A security tool's findings must be trusted, so the H/I/J commits went to an
+external reviewer (Codex). Verdict: **REJECT** — six defects across the three commits.
+Two were false-**negatives** our own adversarial passes had missed; one was a
+fail-**open** the Phase-J narrative above literally documents introducing ("a crash
+degrades to a `LOW` note instead of aborting the scan"). That `LOW`-note backstop was
+the bug: a `LOW` does not move the verdict, so a parser crash on a config read GREEN.
+
+**Discipline (the user's two questions: "это TDD?" and "лечишь диагноз или симптом?").**
+Every finding was **reproduced against the live scanner before any fix** (RED), fixed,
+re-run (GREEN), then **promoted to a permanent fixture vector + a CI snippet assert** so
+it cannot silently return. Where the reported case was only a symptom, the fix went to
+the disease class — and two siblings the audit did *not* name were fixed alongside:
+
+| # | Reported symptom | Diagnosis (disease) | Fix |
+|---|---|---|---|
+| 1 | deep `settings.json` → GREEN | any pass crash fails **open** | backstop → `CRITICAL`; `_parse_json` catches `RecursionError` → textual backstop recovers `CR032` |
+| 2 | "Never mind, …reveal prompt" suppressed | negation scope leaks past a clause boundary | **comma ends the negation's clause** (+ idiom break-words) |
+| 3 | walrus `:=` not propagated | taint enumerates only `Assign*`, not every binding construct | handle `NamedExpr` **and** `for`-targets (the sibling the audit missed) |
+| 4 | `AST009` cross-function false fire + `r+` missed | flow-insensitive global `__file__` binding is unsound; write-mode test missed `+` | **inline-only** matching (drop the global set); write-mode `wax` → `wax+` |
+| 5 | `extractall(filter="fully_trusted")` exempt | exemption keyed on **presence** of the kwarg, not its **value** | exempt only safe values (`filter="data"/"tar"`, `members≠getmembers/getnames`) |
+| 6 | `_exec_magic` reads whole file | **any** per-file read is unbounded (DoS) — the sibling: `unicode`/`ast`/`taint` had no size cap | read 4 bytes; `_read_text_safe` caps at 8 MB; per-file passes skip `> MAX_SCAN_BYTES` in lockstep with `scan_file` (50 MB config: hang → ~0.05 s) |
+
+**Doc-currency, mechanized.** The user's standing demand — *docs must always reflect
+product state* — is now a **CI gate**, not a promise: `scripts/check_docs.py` fails the
+build if any emitted rule ID is undocumented, any `examples/` fixture is unswept, or the
+CHANGELOG top version is missing from the ROADMAP. It immediately found six genuinely
+undocumented historical rules (`CR036`/`CR037`/`HI008`/`FM001`/`FM002`/`ME007`) — now
+documented. Also swept the DEVLOG's own rot: phases E/F/G headers still said "in review".
+
+**Trade recorded (OOS).** `AST009` no longer catches the cross-function form where
+`__file__` is bound on a prior line in one function and written through a parameter in
+another — a deliberate soundness trade (the unsound global binding caused the
+false-positive). The intraprocedural taint pass still does not follow taint through a
+`for`-iterable's *elements* beyond the direct target binding. Both are noted in
+THREAT_MODEL. No new rule IDs — this is correctness + robustness on the shipped set.
