@@ -284,6 +284,29 @@ Cross-function/inter-file поток, file-read/input-источники и sock
 
 ---
 
+### Self-targeting: скилл атакует САМ СЕБЯ / модель (prompt-leak, persistence, self-rewrite, catch-all)
+
+SKILL.md-проза читается моделью как авторитет. Класс — **авторская малварь на
+своём же поле**: приказ модели слить/закрепить/переписать себя или активироваться
+на всё. Все prose-правила — в `PROSE_TARGETING` (скан полной строки) и под
+negation-гардом (защитное «never reveal your system prompt» — пропускается):
+
+| Pattern | Why | Rule |
+|---|---|---|
+| Приказ модели РАСКРЫТЬ свой system prompt/instructions («print your system prompt») | Self-эксфильтрация скрытой конфигурации модели. Якорь — притяжательное/`system` (голое «your prompt» — пользовательский ввод, не флагается). | HI024 (HIGH) |
+| Приказ ЗАПИСАТЬ/ОТПРАВИТЬ system prompt в синк (file/server/log) | Эксфил промпта без литерального эндпоинта, который видят CR026/HI019. | HI025 (HIGH) |
+| Cross-session инъекция («remember … for all future sessions») | Стоячая инструкция, переживающая задачу. Якорь — scope-токен sessions/memory (форма «from now on, always …» намеренно НЕ берётся — FP). | ME013 (MEDIUM) |
+| Скилл переписывает свой SKILL.md/source в рантайме | audited-once → mutates-later, бьёт по пре-инсталл-аудиту. AST-форма — запись в `__file__`; prose-форма — «rewrite your own SKILL.md». | AST009 (HIGH) / ME015 (MEDIUM) |
+| Unscoped catch-all `when_to_use`/`description` («use this for anything and everything») | Активация на всё — предусловие, чтобы любой другой вектор сработал непрошено. Domain-scoped «any React component» НЕ флагается. | ME014 (MEDIUM) |
+
+Это must-take из скоупинга NVIDIA SkillSpector (закрывает их P6/P8/MP1/RA1/TR1/TR3);
+остальное у SS — оверлап / вне оси / нужны сеть-зависимости-LLM (см. спеку
+`docs/specs/2026-06-19-self-targeting.md` §6). Якоря FP: `AST009` — только write-mode
+по `__file__` (skill-builder, пишущий ЧУЖОЙ `SKILL.md`, и READ `__file__` — чисто);
+`ME015` — self-reference `this/your own/the current`.
+
+---
+
 ### Unicode / невидимые символы (bidi, zero-width, Tags, гомоглифы)
 
 SKILL.md читается моделью как инструкции. Регэксп и AST видят уже прочитанный

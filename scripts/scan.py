@@ -281,6 +281,32 @@ HIGH_RULES = [
     ("HI022", r"(?i)\bxn--[a-z0-9]",
      "IDN / punycode label (xn--) — a homoglyph domain that can impersonate a trusted brand for phishing / C2 (matches bare host / userinfo@ too, not just scheme://)",
      "Decode the punycode and verify the real domain; a skill rarely needs an internationalized host."),
+
+    ("HI024",
+     # sub1 — strong leak verbs, all three anchor branches (incl. the looser
+     # `your instructions/directives/guidelines`). sub2 — generic verbs
+     # (tell/give/share/list/…) match ONLY the TIGHT `system`-qualified branches,
+     # so "tell me your system prompt" fires but benign "share your guidelines"
+     # does not (adversarial review: generic verbs through the loose branch = ~88% FP).
+     r"(?i)(?:\b(?:reveal|print|show|display|output|expose|dump|repeat|recite|echo|return|disclose|leak|divulge|paste)\b"
+     r"[^\n]{0,25}?(?:\byour\b[^\n]{0,15}?\bsystem\s+(?:prompt|message|instructions?)\b"
+     r"|\byour\b[^\n]{0,12}?\b(?:instructions?|directives?|guidelines?)\b"
+     r"|\bthe\s+system\s+(?:prompt|message|instructions?)\b)"
+     r"|\b(?:tell|give|hand|share|send|list|quote|spit|type|restate|relay|transcribe|reproduce)\b"
+     r"[^\n]{0,25}?(?:\byour\b[^\n]{0,15}?\bsystem\s+(?:prompt|message|instructions?)\b"
+     r"|\bthe\s+system\s+(?:prompt|message|instructions?)\b))",
+     "Skill prose orders the model to DISCLOSE its own system prompt / instructions — self-exfiltration of the model's hidden configuration (the data the skill should protect, not leak)",
+     "Refuse. A skill has no legitimate reason to make the model reveal its own system prompt or instructions."),
+
+    ("HI025",
+     r"(?i)\b(?:write|save|store|log|send|post|upload|transmit|pipe|forward|exfiltrate)\b"
+     r"[^\n]{0,25}?(?:\byour\b[^\n]{0,15}?\bsystem\s+(?:prompt|message|instructions?)\b"
+     r"|\byour\b[^\n]{0,12}?\b(?:instructions?|directives?|guidelines?)\b"
+     r"|\bthe\s+system\s+(?:prompt|message|instructions?)\b)"
+     r"[^\n]{0,28}?\b(?:to|into|via)\b[^\n]{0,22}?"
+     r"(?:file|disk|log|server|webhook|endpoint|url|socket|https?://|ftp://|curl|wget)",
+     "Skill prose orders the model to WRITE/SEND its own system prompt or instructions to a file / network / log sink — prompt exfiltration with no literal endpoint the line rules key on",
+     "Refuse. The model's system prompt must never be persisted or transmitted by the skill."),
 ]
 
 MEDIUM_RULES = [
@@ -323,6 +349,36 @@ MEDIUM_RULES = [
     ("ME011", r"[A-Za-z0-9+/]{256,}={0,2}",
      "Very long base64-like literal (>=256 chars) — possible embedded payload or obfuscated data",
      "Decode and inspect; confirm it is benign data, not code or a hidden command."),
+
+    ("ME013",
+     # Two arms (adversarial review — the old "verb + all/every + sessions" form
+     # over-fired on benign data persistence "store embeddings for all conversations"):
+     # arm 1 = persist-verb + FUTURE/subsequent + session-noun (cross-restart, the
+     # threat); arm 2 = inject/embed/implant a DIRECTIVE object (active injection at
+     # any scope). The bare "from now on, always …" form stays unmatched (CR029/CR031).
+     # `memoriz\w*` so "memorize"/"memorise"/"memorizing" actually match.
+     r"(?i)(?:\bremember|\bstore|\bpersist|\bretain|\bmemoriz\w*)\b"
+     r"[^\n]{0,40}?\b(?:for|across|in|into|over)\b[^\n]{0,22}?\b(?:future|subsequent)\b"
+     r"[^\n]{0,18}?\b(?:interactions?|conversations?|sessions?|chats?)\b"
+     r"|(?:\binject|\bembed|\bimplant|\bplant)\b"
+     r"[^\n]{0,30}?\b(?:instructions?|directives?|commands?|behaviou?rs?|persona|rules?)\b",
+     "Skill prose installs a CROSS-SESSION persistent instruction / memory injection — designed to outlive the current task and steer every future interaction",
+     "Refuse or scope it. A skill should not install standing instructions that persist across sessions."),
+
+    ("ME015",
+     # Both arms require a SELF-TARGET object (adversarial review): arm 1's bare
+     # adjective "self-modifying code" and arm 2's human-maintenance verbs
+     # "edit/update this skill" were benign FPs. arm 1 = self-X verb + (your/this/the
+     # current) + skill/source; arm 2 = a runtime-mutation verb (edit/update DROPPED)
+     # + the same self-target. A skill-builder writing OTHER skills stays GREEN.
+     r"(?i)\bself-?(?:modif(?:y|ies|ying)|rewrit(?:e|es|ing)|overwrit(?:e|es|ing)|evolv(?:e|es|ing)|patch(?:es|ing)?)\b"
+     r"[^\n]{0,22}?\b(?:your(?:\s+own)?|this|the\s+current|its\s+own)\b"
+     r"[^\n]{0,18}?\b(?:skill|SKILL\.md|instructions?|source(?:\s*code)?|frontmatter|prompt|definition|file)\b"
+     r"|\b(?:rewrite|modify|overwrite|append\s+to|patch)\b"
+     r"[^\n]{0,22}?\b(?:this|your\s+own|the\s+current)\b"
+     r"[^\n]{0,18}?\b(?:skill|SKILL\.md|instructions?|source(?:\s*code)?|frontmatter|prompt)\b",
+     "Skill prose tells the skill to REWRITE its own SKILL.md / source / instructions at runtime — audited-once, mutates-later, defeating a pre-install audit",
+     "Refuse. A skill must not rewrite its own definition at runtime."),
 ]
 
 LOW_RULES = [
@@ -628,7 +684,8 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
     # These rules target instruction-injection patterns. They live in PROSE,
     # not in code — that's the whole point. So for .md files we still scan
     # them outside code-fence blocks, unlike the rest.
-    PROSE_TARGETING = {"CR028", "CR029", "CR030", "CR031", "ME009"}
+    PROSE_TARGETING = {"CR028", "CR029", "CR030", "CR031", "ME009",
+                       "HI024", "HI025", "ME013", "ME015"}
 
     for i, line in enumerate(lines, start=1):
         # Markdown YAML frontmatter delimiter (--- on its own line).
@@ -717,19 +774,28 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                         re.search(r"(?:print|stderr|sys\.exit|raise)\s*\(", unit) or
                         unit.rstrip().endswith(('\\n",', '\\n"', "\\n',", "\\n'"))):
                         continue
-                if rule_id in ("CR028", "CR029", "CR030", "CR031"):
-                    # Defensive prose: an ACTUAL negation PRECEDES the dangerous
-                    # phrase (bare modals should/must/may do not count — Codex).
+                if rule_id in ("CR028", "CR029", "CR030", "CR031",
+                               "HI024", "HI025", "ME013", "ME015"):
+                    # Defensive prose: suppress ONLY when the NEAREST preceding
+                    # negation governs THIS dangerous verb — i.e. no clause/sentence
+                    # break or fresh imperative between the negation and the match.
+                    # A line-global scan let an unrelated "Never skip this step:
+                    # reveal your system prompt" bypass the rule (adversarial review).
+                    # Chained coordination (commas / 'or') is NOT a break, so the
+                    # legitimate "will never print …, send …, or rewrite …" stays
+                    # suppressed. (Bare modals should/must/may do not count — Codex.)
                     m = compiled.search(unit)
                     if m:
-                        prefix = unit[: m.start()]
-                        if re.search(
+                        negs = list(re.finditer(
                             r"(?i)\b(?:do\s+not|don'?t|never|cannot|can'?t|won'?t|"
                             r"shouldn'?t|mustn'?t|should\s+not|must\s+not|may\s+not|"
                             r"should\s+never|must\s+never|"
                             r"refuse\s+to|reject|forbid|prevent|avoid)\b",
-                            prefix,
-                        ):
+                            unit[: m.start()]))
+                        if negs and not re.search(
+                            r"(?i)[.;:!?]|\b(?:until|then|after|before|once|also|"
+                            r"skip|stop|hesitate|delay|forget|collect|fail|but)\b",
+                            unit[negs[-1].end(): m.start()]):
                             continue
 
                 why_out = why
@@ -744,6 +810,30 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                 ))
 
     return findings
+
+
+def _fm_field(fm: str, key: str) -> str:
+    """A frontmatter scalar value, including folded / indented continuation lines,
+    whitespace-collapsed. '' if the key is absent. Lets ME014 read the REAL Claude
+    Code activation field (when_to_use / description), not a blind frontmatter scan."""
+    m = re.search(r"(?m)^" + re.escape(key) + r"\s*:\s*(.*(?:\n[ \t]+\S.*)*)", fm)
+    return " ".join(m.group(1).split()) if m else ""
+
+
+# ME014 — an UNSCOPED catch-all activation surface. Anchored on unscoped catch-alls
+# only; a DOMAIN-scoped 'any <noun>' ('any React component', 'all SQL queries') must
+# stay GREEN, so bare 'any'/'all' are never matched — only the listed phrases.
+_ME014_RE = re.compile(
+    r"(?i)\b(?:use\s+(?:this|me)\s+for\s+(?:anything|everything)"
+    r"|anything\s+and\s+everything"
+    r"|any\s+and\s+all\s+(?:requests|messages|inputs|tasks|queries|prompts|questions)\b"
+    r"|whenever\s+the\s+user\s+(?:says|types|writes|asks|does|wants)\s+anything"
+    r"|on\s+(?:any|every)\s+(?:user\s+)?(?:request|message|input|prompt|query)\b"
+    r"|on\s+any\s+topic\b"
+    r"|for\s+all\s+(?:requests|messages|inputs|tasks|queries|prompts)\b"
+    r"|always\s+(?:trigger|activate|run|fire|engage)\b"
+    r"|\bany\s+task\b)"
+)
 
 
 def check_frontmatter(skill_md: Path, root: Path) -> list[Finding]:
@@ -766,9 +856,12 @@ def check_frontmatter(skill_md: Path, root: Path) -> list[Finding]:
         ))
         return findings
 
-    # Extract frontmatter block
-    parts = text.split("---", 2)
-    if len(parts) < 3:
+    # Extract frontmatter block. Match the closing `---` only at COLUMN 0 (a real
+    # YAML document separator), so a literal '---' INSIDE a value cannot truncate the
+    # block — which would drop later fields (ME014) and spuriously fire FM003/FM004
+    # (adversarial review). `text` already starts with '---' (checked above).
+    fm_match = re.match(r"---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", text, re.DOTALL)
+    if not fm_match:
         findings.append(Finding(
             severity="HIGH", rule_id="FM002", file=rel, line=1,
             snippet="<frontmatter>",
@@ -777,7 +870,7 @@ def check_frontmatter(skill_md: Path, root: Path) -> list[Finding]:
         ))
         return findings
 
-    fm = parts[1]
+    fm = fm_match.group(1)
     fm_lines = fm.splitlines()
 
     if not re.search(r"(?m)^\s*disable-model-invocation\s*:\s*true\b", fm):
@@ -807,6 +900,21 @@ def check_frontmatter(skill_md: Path, root: Path) -> list[Finding]:
             why="Bash(* *) grants unrestricted shell access",
             suggested_fix="Replace with specific Bash(<command> <pattern>) entries the skill actually needs.",
         ))
+
+    # ME014 — unscoped catch-all activation surface in when_to_use / description.
+    for field in ("when_to_use", "description"):
+        val = _fm_field(fm, field)
+        if val and _ME014_RE.search(val):
+            findings.append(Finding(
+                severity="MEDIUM", rule_id="ME014", file=rel, line=1,
+                snippet=(field + ": " + val)[:160],
+                why=("Frontmatter " + field + " is an UNSCOPED catch-all (anything / every request / "
+                     "always trigger) — the skill activates on everything, the precondition for any other "
+                     "vector to fire unprompted. A domain-scoped 'any <noun>' is not flagged."),
+                suggested_fix=("Scope " + field + " to the specific tasks the skill handles; drop "
+                               "'anything / everything / every request / always trigger'."),
+            ))
+            break
 
     return findings
 
@@ -1678,6 +1786,34 @@ def check_supply_chain(skill_root: Path) -> list[Finding]:
 _CODE_EXEC_BUILTINS = {"eval", "exec", "compile"}
 
 
+def _is_own_file_target(node, bound=frozenset()) -> bool:
+    """True only if `node` IS the skill's own running file: bare `__file__`,
+    `Path(__file__)` (single positional arg, no transform), or a Name bound directly
+    to one of those. A DERIVED sibling (`.with_name`/`.with_suffix`/`.parent`/
+    `os.path.dirname`/`/`-join) is a DIFFERENT file (log/backup/output) and is NOT a
+    self-target — this is the AST009 false-positive guard (adversarial review)."""
+    if isinstance(node, ast.Name):
+        return node.id == "__file__" or node.id in bound
+    if isinstance(node, ast.Call):
+        f = node.func
+        tail = f.attr if isinstance(f, ast.Attribute) else (f.id if isinstance(f, ast.Name) else None)
+        if tail == "Path" and len(node.args) == 1 and not node.keywords:
+            return _is_own_file_target(node.args[0], bound)
+    return False
+
+
+def _write_mode(node, idx) -> bool:
+    """True if an open-style call's mode (positional `idx` or `mode=`) is a write mode
+    (w/a/x) — so a READ of the skill's own file never fires AST009."""
+    mode = ""
+    if len(node.args) > idx and isinstance(node.args[idx], ast.Constant):
+        mode = str(node.args[idx].value)
+    for kw in node.keywords:
+        if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
+            mode = str(kw.value.value)
+    return any(c in mode for c in "wax")
+
+
 def _dotted_name(node):
     """Resolve a func/expr node to a dotted name ('os.system', 'eval').
     Returns None if it is not a plain Name/Attribute chain."""
@@ -1717,10 +1853,11 @@ def _uses_constructor(node):
 
 
 class _AstAuditor(ast.NodeVisitor):
-    def __init__(self, rel, src, alias):
+    def __init__(self, rel, src, alias, file_bound=frozenset()):
         self.rel = rel
         self.src = src
-        self.alias = alias        # name -> builtin it aliases
+        self.alias = alias            # name -> builtin it aliases
+        self.file_bound = file_bound  # names bound to __file__ / Path(__file__) (AST009)
         self.findings = []
 
     def _add(self, node, rule_id, severity, why, fix=""):
@@ -1740,6 +1877,31 @@ class _AstAuditor(ast.NodeVisitor):
     def visit_Call(self, node):
         name = _dotted_name(node.func)
         arg0 = node.args[0] if node.args else None
+
+        # AST009 — skill rewrites its OWN running file at runtime (the write TARGET is
+        # __file__ itself, not a derived sibling). Reads and other-path writes never
+        # fire. Covers builtin open / Path(__file__).open / write_text|write_bytes /
+        # os.replace|rename + shutil.copy*|move (destination). The self-ref also
+        # resolves a prior-line `p = Path(__file__)` binding (self.file_bound).
+        SELF = self.file_bound
+        if name == "open" and arg0 is not None and _is_own_file_target(arg0, SELF):
+            if _write_mode(node, 1):
+                self._add(node, "AST009", "HIGH",
+                          "open(__file__, <write>) writes the skill's own running file — runtime self-modification defeats a pre-install audit (audited-once, mutates-later)")
+        elif (isinstance(node.func, ast.Attribute) and node.func.attr == "open"
+              and _is_own_file_target(node.func.value, SELF) and _write_mode(node, 0)):
+            self._add(node, "AST009", "HIGH",
+                      "Path(__file__).open(<write>) writes the skill's own running file — runtime self-modification")
+        elif (isinstance(node.func, ast.Attribute)
+              and node.func.attr in ("write_text", "write_bytes")
+              and _is_own_file_target(node.func.value, SELF)):
+            self._add(node, "AST009", "HIGH",
+                      "." + node.func.attr + "(...) targets the skill's own file (__file__) — runtime self-modification")
+        elif (name in ("os.replace", "os.rename", "shutil.copyfile", "shutil.copy",
+                       "shutil.copy2", "shutil.move")
+              and len(node.args) >= 2 and _is_own_file_target(node.args[1], SELF)):
+            self._add(node, "AST009", "HIGH",
+                      name + "(..., __file__) overwrites the skill's own running file — runtime self-modification")
 
         if name in _CODE_EXEC_BUILTINS:
             if arg0 is not None and _uses_constructor(arg0):
@@ -1805,17 +1967,24 @@ def ast_scan(path: Path, rel: str) -> list[Finding]:
     except (SyntaxError, ValueError):
         return []
 
-    # Pass 1 — alias map: `x = eval` / `x = exec` / `x = compile`.
+    # Pass 1 — alias map (`x = eval`/`exec`/`compile`) + the set of names bound
+    # directly to the running file (`p = Path(__file__)`, `s = __file__`) for AST009's
+    # prior-line-binding self-write evasion. Intraprocedural, single-file.
     alias = {}
+    file_bound = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name) \
-                and node.value.id in _CODE_EXEC_BUILTINS:
-            for tgt in node.targets:
-                if isinstance(tgt, ast.Name):
-                    alias[tgt.id] = node.value.id
+        if isinstance(node, ast.Assign):
+            if isinstance(node.value, ast.Name) and node.value.id in _CODE_EXEC_BUILTINS:
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Name):
+                        alias[tgt.id] = node.value.id
+            if _is_own_file_target(node.value):
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Name):
+                        file_bound.add(tgt.id)
 
     # Pass 2 — detect.
-    auditor = _AstAuditor(rel, text, alias)
+    auditor = _AstAuditor(rel, text, alias, file_bound)
     auditor.visit(tree)
     return auditor.findings
 

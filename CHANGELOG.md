@@ -4,6 +4,54 @@ All notable changes to skill-checker.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.9.0] — 2026-06-19
+
+**Borrow-from-SkillSpector** increment. A scoping pass over NVIDIA SkillSpector's 16
+categories (read from its analyzer source, not the README) found most of its 64
+patterns already covered by our passes, off our threat axis, or needing
+network/deps/LLM. The genuine **must-take** residue is three small dependency-free
+gaps — all on our own edge surface (the SKILL.md prose the model reads as authority,
+the frontmatter, the Python AST). Closes SS **P6, P8, MP1, RA1, TR1, TR3**.
+
+### Added
+- `scripts/scan.py`: six rules across three existing passes (no new subsystem),
+  empirically GREEN-before / RED-after:
+  - **`HI024` (HIGH)** — `SKILL.md` prose ordering the model to **disclose** its own
+    system prompt / instructions (P6). Possessive / `system` anchor → bare *"your
+    prompt"* (user-input) does not fire.
+  - **`HI025` (HIGH)** — prose ordering the model to **write/send** its own system
+    prompt to a file / network / log sink (P8) — the host-less prompt-to-sink form
+    the endpoint-anchored exfil rules miss.
+  - **`ME013` (MEDIUM)** — a **cross-session persistent** instruction / memory
+    injection (MP1). Cross-session scope anchor only; the FP-prone *"from now on,
+    always …"* form is deliberately not matched.
+  - **`ME015` (MEDIUM)** — prose telling the skill to **rewrite its own** SKILL.md /
+    source (RA1, prose form). Self-reference anchor (`this`/`your own`/`the current`)
+    spares a skill-builder writing **other** skills.
+  - **`ME014` (MEDIUM)** — an **unscoped catch-all** `when_to_use`/`description`
+    activation surface (TR1/TR3) — `anything`/`every request`/`always trigger`.
+    Domain-scoped *"any React component"* / *"all SQL queries"* stays GREEN.
+  - **`AST009` (HIGH)** — `open(__file__, "w")` / `.write_text`/`.write_bytes` to the
+    skill's **own running file** (RA1, AST form). Read modes and writes to any other
+    path (incl. a skill-builder emitting another skill's `SKILL.md`) do not fire.
+  - The four prose rules join `CR028–031` in `PROSE_TARGETING` (scan full prose
+    lines) and the position-based **negation guard** (defensive *"never reveal your
+    system prompt"* is skipped). New helpers `_refs_dunder_file`, `_fm_field`,
+    `_ME014_RE`.
+- `SKILL.md` Step 7: an advisory **description-vs-behavior** comparison against the
+  scanner's enumerated evidence (network sinks, credential reads, taint flows) — the
+  borrow of SS's `TP4` that needs an LLM, so it lands as a Claude-side step (advisory,
+  never an auto-RED gate), not a `scan.py` rule.
+- `examples/evil-selftarget/` (GREEN→RED, all six rules) + `examples/clean-selftarget/`
+  (defensive negation, a skill-builder writing another skill's file, domain-scoped
+  `any`, a `__file__` **read**) → exit 0.
+- CI: `evil-selftarget` exit 3 with all six ids + per-form snippet locks;
+  `clean-selftarget` exit 0 with none.
+- `docs/specs/2026-06-19-self-targeting.md` (incl. the full SKIP / OPT-IN / needs-LLM
+  ledger of the dropped SkillSpector borrows); `THREAT_MODEL.md`, `docs/ROADMAP.md`,
+  `README.md`, `references/red-flags.md`, `references/patch-templates.md`, `SKILL.md`
+  updated.
+
 ## [1.8.0] — 2026-06-19
 
 Deepens the Python AST pass into **data flow**: a new **taint pass** connecting a
