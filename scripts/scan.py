@@ -1821,6 +1821,303 @@ def ast_scan(path: Path, rel: str) -> list[Finding]:
 
 
 # --------------------------------------------------------------------------
+# Taint / data-flow pass (credential -> network exfil)
+#
+# The AST pass classifies one Call node at a time; it has no notion of where a
+# value came from. This pass tracks a CREDENTIAL read (os.environ / os.getenv)
+# through intervening assignments — variables, container literals, f-strings,
+# concatenation — into a network-output SINK, and rates the flow by the sink's
+# DESTINATION:
+#   TF001 CRITICAL — destination is reputation-bad or user-controlled: a bare /
+#     encoded public IP, a punycode host, a known exfil/tunnel/metadata host, or a
+#     non-literal (runtime-chosen) URL. Two rare facts ANDed (secret-tainted AND
+#     bad/dynamic dest) -> a legit API client cannot land here -> in the <=5% budget.
+#   TF002 HIGH     — destination is a hardcoded NAMED host (the legitimate
+#     authenticated-API-client shape, incl. loopback/RFC1918). A secret still leaves
+#     the machine, so a human reviews, but it is not auto-refused.
+#
+# ADDITIVE-ONLY: it never suppresses or downgrades a line/AST finding (HI009 still
+# fires on every network call). It NEVER executes the audited code (ast.parse only)
+# and degrades to a no-op on a parse error. Intraprocedural, single file, monotonic
+# (no taint kill). Cross-function / inter-file flow and container-mutation aliasing
+# are out of scope (THREAT_MODEL #4); socket sinks need type inference we lack.
+# --------------------------------------------------------------------------
+
+# Network-output sinks, resolved by dotted callee name (the HI009 vocabulary). An
+# instance method on an unknown variable (`session.post`) is out — same limitation
+# HI009 carries; matching a bare `.post`/`.send` would be FP-prone without types.
+_NET_SINK_NAMES = {"urllib.request.urlopen", "urllib.request.Request"}
+_NET_SINK_BASES = ("requests", "httpx", "aiohttp")
+_NET_SINK_METHODS = {"get", "post", "put", "patch", "delete", "request",
+                     "head", "options"}
+
+# Known exfil / tunnel / cloud-metadata host regexes, derived FROM the CRITICAL line
+# rules so the taint gate and the line pass share ONE definition (no parallel host
+# table to drift). CR026 = anonymous webhooks, CR034 = tunnels/OOB, CR038 = metadata.
+_EXFIL_HOST_RES = [re.compile(p) for (rid, p, _w, _f) in CRITICAL_RULES
+                   if rid in {"CR026", "CR034", "CR038"}]
+
+
+def _is_cred_source(node) -> bool:
+    """True if `node` reads the process environment — a single key
+    (os.environ[...], os.getenv(...), os.environ.get(...)) OR the WHOLE environment
+    (os.environ.copy()/items()/values()/keys(), dict(os.environ), or a bare
+    os.environ mapping). A whole-environment read is STRICTLY more dangerous (it
+    carries every secret at once), so it must be at least as detectable. All
+    os.environ reads count — we cannot distinguish a SECRET var from a config var by
+    name in this phase (over-paranoid by design)."""
+    if isinstance(node, ast.Call):
+        dn = _dotted_name(node.func)
+        if dn in ("os.getenv", "os.environ.get", "os.environ.copy",
+                  "os.environ.items", "os.environ.values", "os.environ.keys"):
+            return True
+        # dict(os.environ) / list(os.environ) / ... wrapping the bare mapping
+        if dn in ("dict", "list", "tuple", "set", "frozenset") and any(
+                _dotted_name(a) == "os.environ" for a in node.args):
+            return True
+        return False
+    if isinstance(node, ast.Subscript):
+        return _dotted_name(node.value) == "os.environ"
+    if isinstance(node, ast.Attribute):
+        return _dotted_name(node) == "os.environ"   # bare os.environ mapping read
+    return False
+
+
+def _is_net_sink(call) -> bool:
+    """True if a Call's resolved callee is a recognized HTTP-client network sink."""
+    name = _dotted_name(call.func)
+    if not name:
+        return False
+    if name in _NET_SINK_NAMES:
+        return True
+    if "." in name:
+        base, _, method = name.rpartition(".")
+        return base.split(".", 1)[0] in _NET_SINK_BASES and method in _NET_SINK_METHODS
+    return False
+
+
+def _sink_url_arg(call):
+    """The URL value node of a network sink: the `url=` kwarg if present, else the
+    positional URL. For requests/httpx/aiohttp `.request(method, url, ...)` the HTTP
+    method is arg0 and the URL is arg1; every other sink (.get/.post/…, urllib
+    urlopen/Request) carries the URL at arg0. None if absent."""
+    for kw in call.keywords:
+        if kw.arg == "url":
+            return kw.value
+    name = _dotted_name(call.func) or ""
+    base, _, method = name.rpartition(".")
+    idx = 1 if (method == "request" and base.split(".", 1)[0] in _NET_SINK_BASES) else 0
+    return call.args[idx] if len(call.args) > idx else None
+
+
+def _expr_has_taint(node, tainted) -> bool:
+    """True if any tainted Name OR an inline credential-source expression appears
+    anywhere inside `node`. Container literals / f-strings / concatenation propagate
+    for free because the tainted node is a descendant."""
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name) and sub.id in tainted:
+            return True
+        if _is_cred_source(sub):
+            return True
+    return False
+
+
+def _sink_payload_tainted(call, tainted, url_node) -> bool:
+    """True if a tainted value reaches the sink's PAYLOAD (any arg/kwarg EXCEPT the
+    URL), or is EMBEDDED in a constructed URL (f-string / concat). The URL position
+    itself is deliberately excluded from payload taint: a bare env value used AS the
+    destination (`requests.post(os.environ['API_URL'], json=data)`) is a configurable
+    endpoint, not secret exfiltration — flagging it would blow the budget. A secret
+    BUILT INTO the URL (`f'https://evil/{secret}'`) is still caught, because that
+    url_node is a JoinedStr/BinOp carrying the tainted sub-expression."""
+    for a in call.args:
+        if a is url_node:
+            continue
+        if _expr_has_taint(a, tainted):
+            return True
+    for kw in call.keywords:
+        if kw.value is url_node:
+            continue
+        if _expr_has_taint(kw.value, tainted):
+            return True
+    if isinstance(url_node, (ast.JoinedStr, ast.BinOp)) and _expr_has_taint(url_node, tainted):
+        return True
+    return False
+
+
+def _classify_dest(url_node):
+    """(rule_id, reason) for a tainted sink's destination. TF001 (CRITICAL) when the
+    destination is non-literal or reputation-bad; TF002 (HIGH) for a hardcoded named
+    host. Reuses the CR040 machinery — _reputation_bad_dest needs the FULL URL string
+    (with scheme), so a string Constant is passed whole."""
+    if url_node is None:
+        return "TF001", "no explicit destination (dynamic)"
+    if not _is_literal(url_node):
+        return "TF001", "a user-/runtime-controlled (non-literal) destination"
+    if isinstance(url_node, ast.Constant) and isinstance(url_node.value, str):
+        url = url_node.value
+        reason = _reputation_bad_dest(url)
+        if reason:
+            return "TF001", reason
+        if any(rx.search(url) for rx in _EXFIL_HOST_RES):
+            return "TF001", "a known exfiltration / tunnel / cloud-metadata host"
+        return "TF002", None
+    return "TF001", "a non-string literal destination"
+
+
+_TF_WHY = {
+    "TF001": ("A value read from an environment secret (os.environ / os.getenv) flows "
+              "into a network call pointed at {reason} — exfiltration of a credential "
+              "to a reputation-bad or runtime-controlled endpoint. The flow crosses "
+              "assignments/containers the line and AST passes scan one at a time, so it "
+              "reads only YELLOW without data-flow tracking."),
+    "TF002": ("A value read from an environment secret (os.environ / os.getenv) flows "
+              "into a network call to a hardcoded NAMED host — the shape of a legitimate "
+              "authenticated API client, but a secret is still leaving the machine to a "
+              "third party. Not auto-refused; a human confirms the destination owns the "
+              "credential."),
+}
+_TF_FIX = {
+    "TF001": ("Refuse. A skill must not read an environment secret and send it to a bare "
+              "IP, an encoded/punycode host, a known webhook, or a runtime-chosen URL. If "
+              "outbound auth is required, the secret stays server-side."),
+    "TF002": ("Confirm the named destination is the credential's own service. Prefer a "
+              "vetted SDK, pin the endpoint, and never forward a secret to a host you do "
+              "not control."),
+}
+
+
+class _TaintAuditor:
+    """Intraprocedural, source-order, monotonic taint walker. One taint set per
+    function/module scope; nested blocks (if/for/while/with/try) share the scope;
+    nested function/class defs get a fresh scope (params are never tainted —
+    cross-function flow is out of scope)."""
+
+    def __init__(self, rel, src):
+        self.rel = rel
+        self.src = src
+        self.findings = []
+        self._seen = set()  # (lineno, col) of sink calls already emitted
+
+    def run(self, tree):
+        self._walk_block(tree.body, set())
+
+    def _walk_block(self, stmts, tainted):
+        for stmt in stmts:
+            self._visit(stmt, tainted)
+
+    def _visit(self, stmt, tainted):
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            self._walk_block(stmt.body, set())   # fresh scope; params untainted
+            return
+        # 1) sinks in this statement's OWN expressions (lambda bodies as fresh
+        #    scopes; nested statement blocks are walked separately below)
+        self._scan_sinks(stmt, tainted)
+        # 2) seed / propagate taint from assignments (after the RHS is scanned)
+        self._apply_assign(stmt, tainted)
+        # 3) recurse into nested statement blocks (same scope, source order)
+        for block in self._child_blocks(stmt):
+            self._walk_block(block, tainted)
+
+    def _scan_sinks(self, node, tainted):
+        """Evaluate every network sink in `node`'s expressions with `tainted`.
+        A Lambda body is scanned as a FRESH scope (params untainted — cross-function
+        flow is out of scope). Nested statements (and the def/class statements among
+        them) are not descended here — they are walked separately as their own
+        scopes — so a sink is evaluated exactly once, at its own statement."""
+        if isinstance(node, ast.Lambda):
+            self._scan_sinks(node.body, set())
+            return
+        if isinstance(node, ast.Call) and _is_net_sink(node):
+            self._eval_sink(node, tainted)
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.stmt):
+                continue
+            self._scan_sinks(child, tainted)
+
+    @staticmethod
+    def _child_blocks(stmt):
+        blocks = []
+        for field in ("body", "orelse", "finalbody"):
+            v = getattr(stmt, field, None)
+            if isinstance(v, list) and v and all(isinstance(x, ast.stmt) for x in v):
+                blocks.append(v)
+        for h in getattr(stmt, "handlers", []) or []:
+            if isinstance(h, ast.ExceptHandler):
+                blocks.append(h.body)
+        # match/case bodies (Python 3.10+). Guarded so the 3.9 floor never trips on
+        # ast.match_case (a Match node can't exist there — 3.9 can't parse `match`).
+        match_case = getattr(ast, "match_case", None)
+        if match_case is not None:
+            for c in getattr(stmt, "cases", []) or []:
+                if isinstance(c, match_case):
+                    blocks.append(c.body)
+        return blocks
+
+    def _apply_assign(self, stmt, tainted):
+        if isinstance(stmt, ast.Assign):
+            if _expr_has_taint(stmt.value, tainted):
+                for tgt in stmt.targets:
+                    self._mark(tgt, tainted)
+        elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+            if _expr_has_taint(stmt.value, tainted):
+                self._mark(stmt.target, tainted)
+        elif isinstance(stmt, ast.AugAssign):
+            if _expr_has_taint(stmt.value, tainted):
+                self._mark(stmt.target, tainted)
+
+    def _mark(self, target, tainted):
+        if isinstance(target, ast.Name):
+            tainted.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                self._mark(elt, tainted)
+        elif isinstance(target, ast.Starred):
+            self._mark(target.value, tainted)
+        # Subscript / Attribute targets (d['k'] = secret) are container-mutation,
+        # out of scope — not tracked.
+
+    def _eval_sink(self, call, tainted):
+        key = (getattr(call, "lineno", 0), getattr(call, "col_offset", 0))
+        if key in self._seen:
+            return
+        url_node = _sink_url_arg(call)
+        if not _sink_payload_tainted(call, tainted, url_node):
+            return
+        rule, reason = _classify_dest(url_node)
+        self._seen.add(key)
+        severity = "CRITICAL" if rule == "TF001" else "HIGH"
+        why = _TF_WHY[rule].format(reason=reason) if reason else _TF_WHY[rule]
+        try:
+            seg = ast.get_source_segment(self.src, call) or ""
+        except Exception:
+            seg = ""
+        seg = " ".join(seg.split())
+        if len(seg) > 160:
+            seg = seg[:157] + "..."
+        self.findings.append(Finding(
+            severity=severity, rule_id=rule, file=self.rel,
+            line=getattr(call, "lineno", 0), snippet=seg, why=why,
+            suggested_fix=_TF_FIX[rule],
+        ))
+
+
+def taint_scan(path: Path, rel: str) -> list[Finding]:
+    """Taint pass for a single .py file. Parses with ast.parse (never executes);
+    degrades to a no-op if the source will not parse."""
+    text = _read_text_safe(path)
+    if text is None:
+        return []
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return []
+    auditor = _TaintAuditor(rel, text)
+    auditor.run(tree)
+    return auditor.findings
+
+
+# --------------------------------------------------------------------------
 # Unicode / invisible-character pass
 #
 # The regex and AST passes operate on text after it is read; they cannot see
@@ -2043,6 +2340,7 @@ def main() -> int:
         findings.extend(unicode_scan(skill_root / rel, rel))
         if rel.endswith(".py"):
             findings.extend(ast_scan(skill_root / rel, rel))
+            findings.extend(taint_scan(skill_root / rel, rel))
 
     # Note any non-text or symlink files (Claude-side review treats these as red flags)
     for other in inv["other_files"]:

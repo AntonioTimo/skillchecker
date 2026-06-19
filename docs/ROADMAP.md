@@ -16,6 +16,7 @@ out of scope" item or a spec "Non-goals" line.
 | E | Evasion v2: NFKC normalization + homoglyph domains | 1.5.0 |
 | F | Supply-chain: bundled dependency manifests | 1.6.0 |
 | G | MCP / hook destination reputation (`CR040`) | 1.7.0 |
+| H | Taint / data-flow: credential → network exfil (`TF001`/`TF002`) | 1.8.0 |
 
 ## v3 candidates
 
@@ -25,9 +26,19 @@ out of scope" item or a spec "Non-goals" line.
   cloud-metadata SSRF endpoint (`CR038`) that `HI019`'s link-local guard would
   otherwise skip. *Source: spec B's "full TR39 / NFKC / IDN homoglyphs"
   non-goal, plus a guard gap found after v1.4.0.*
-- **Taint / data-flow AST:** cross-function flow so a dangerous sink fed by a
-  traced value is distinguished. *Source: THREAT_MODEL #4, spec A.* Caveat: must
-  not REDUCE paranoia — the tool flags every non-literal sink today.
+- **Taint / data-flow AST (✅ partially shipped in v1.8.0):** Phase H added an
+  intraprocedural, single-file taint pass connecting a **credential source**
+  (`os.environ`/`os.getenv`) to a **network sink** — `TF001` CRITICAL (reputation-bad
+  / user-controlled destination), `TF002` HIGH (hardcoded named host). Additive-only;
+  reuses the `CR040` destination machinery; the URL position is excluded from payload
+  taint to spare configurable env→URL endpoints. *Source: THREAT_MODEL #4, spec A;
+  cross-checked vs NVIDIA SkillSpector `behavioral_taint_tracking`.* Residual / next
+  increment: **cross-function** and **inter-file** flow (no call graph), **other
+  source/sink families** (file-read→network à la SkillSpector TT4, external-input→exec
+  TT5, tainted→file-write), **container-mutation aliasing**, and **`socket.send`
+  sinks** (need type inference). Caveat preserved: the pass never REDUCES paranoia —
+  it only adds/escalates on top of the non-literal-sink findings the tool already
+  emits.
 - **JS / TS AST pass:** a real parser for JS like `ast` is for Python. *Source:
   spec A.* Blocked on a dependency-free JS parser (the scanner ships no deps,
   makes no network calls).

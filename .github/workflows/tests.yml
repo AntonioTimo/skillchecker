@@ -438,6 +438,85 @@ jobs:
           print("clean-mcp: exit 0 (GREEN), no CR040/CR032/CR033/HI017 on the data file ✓")
           PY
 
+      - name: evil-taint must exit 3 (RED) with TF001 + TF002 (credential->network flow)
+        run: |
+          set +e
+          python3 scripts/scan.py examples/evil-taint/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 3 ]; then
+            echo "::error::evil-taint should exit 3 (RED), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          python3 <<'PY'
+          import json, sys
+          data = json.load(open("/tmp/out.json"))
+          findings = data["findings"]
+          rules = [f["rule_id"] for f in findings]
+          tf001 = "\n".join(f["snippet"] for f in findings if f["rule_id"] == "TF001")
+          tf002 = "\n".join(f["snippet"] for f in findings if f["rule_id"] == "TF002")
+          missing = []
+          # TF001 must catch every credential->bad/dynamic-dest exfil chain (>=10).
+          if rules.count("TF001") < 10:
+              missing.append(("TF001", f"expected >=10 credential-exfil chains, got {rules.count('TF001')}"))
+          if "TF002" not in rules:
+              missing.append(("TF002", "named-host credential egress (HIGH, not CRITICAL)"))
+          # Lock each TF001 form by snippet — one form breaking silently while
+          # another still fires must not keep CI green. Includes the four
+          # adversarial-review regression locks (.request / whole-env / match / lambda).
+          tf001_variants = {
+              "8.8.8.8": "public-IP literal + container-literal propagation",
+              "target_url": "user-/runtime-controlled (non-literal) URL",
+              'f"https://': "f-string (non-literal) destination",
+              "0x08080808": "hex-encoded IP literal",
+              "xn--80ak6aa92e": "punycode / IDN host (httpx sink)",
+              "webhook.site": "known-exfil host via shared _EXFIL_HOST_RES",
+              "urlopen": "urllib sink, non-literal URL",
+              'requests.request("POST"': ".request(method, url): URL read from arg1 not the method",
+              "185.220.101.5": ".request public-IP destination",
+              "2130706433": "whole-environment dump source (dict(os.environ)) -> decimal-encoded dest",
+              "93.184.216.34": "match/case body traversal",
+              "45.83.122.10": "lambda body traversal",
+          }
+          missing += [("TF001", v + " [snippet]") for k, v in tf001_variants.items() if k not in tf001]
+          # Discrimination: the named-host and loopback egresses MUST be TF002 (HIGH),
+          # and MUST NOT appear as TF001 (no over-escalation of a benign destination).
+          for k, why in {"api.myservice.com": "named-host legit-client shape",
+                         "127.0.0.1": "loopback dev host"}.items():
+              if k not in tf002:
+                  missing.append(("TF002", k + " must be HIGH [snippet]"))
+              if k in tf001:
+                  missing.append(("TF001", k + " must NOT be escalated to CRITICAL"))
+          if missing:
+              print("::error::evil-taint missing/incorrect catches:")
+              for rule, why in missing:
+                  print(f"  - {rule} ({why})")
+              sys.exit(1)
+          print("evil-taint: exit 3 (RED), TF001 forms + TF002 discrimination present OK")
+          PY
+
+      - name: clean-taint must exit 0 (GREEN) with zero TF findings
+        run: |
+          set +e
+          python3 scripts/scan.py examples/clean-taint/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::clean-taint should exit 0 (GREEN), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          python3 <<'PY'
+          import json, sys
+          data = json.load(open("/tmp/out.json"))
+          tf = sorted({f["rule_id"] for f in data["findings"] if f["rule_id"].startswith("TF")})
+          if tf:
+              print("::error::clean-taint leaked taint findings on benign credential reads:", tf)
+              sys.exit(1)
+          print("clean-taint: exit 0 (GREEN), no TF findings ✓")
+          PY
+
       - name: Self-audit smoke test (no crash)
         run: |
           # Self-audit IS expected to flag references/*.md (documentation of

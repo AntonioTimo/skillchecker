@@ -4,6 +4,55 @@ All notable changes to skill-checker.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.8.0] — 2026-06-19
+
+Deepens the Python AST pass into **data flow**: a new **taint pass** connecting a
+**credential source** (`os.environ` / `os.getenv`) to a **network sink** across
+intervening assignments. The line and AST passes classify one node at a time, so a
+secret read in one statement, packaged in a second, and shipped in a third reads
+only 🟡 YELLOW (a lone `HI009`). That split-variable credential exfil is the
+project's worst-failure class — a dangerous skill under-rated — and now reads 🔴 RED.
+The central FP tension (a legitimate authenticated API client is the same shape) is
+resolved **by construction**, gating CRITICAL on the **destination**, not the flow —
+no in-loop LLM, unlike the SkillSpector reference impl this phase cross-checked.
+
+### Added
+- `scripts/scan.py`: a new **`TF` family** (taint-flow) in a new pass `taint_scan`,
+  called from `main()` per `.py` file after `ast_scan` (re-parses; never executes).
+  - **`TF001` (CRITICAL)** — a credential-tainted value reaches an HTTP-client
+    network sink whose destination is **reputation-bad or user-controlled**: a
+    non-literal URL, a public-IP literal (incl. hex/decimal-encoded), a punycode/IDN
+    host, or a known exfil/tunnel/metadata host. Two rare facts ANDed
+    (secret-tainted **and** bad/dynamic dest) keep it in the ≤5% budget — a legit API
+    client cannot land here.
+  - **`TF002` (HIGH)** — the same flow to a **hardcoded named-HTTPS** host (incl.
+    loopback/RFC1918): the legit-client shape, a secret still leaving the machine, so
+    a human reviews — not auto-refused.
+  - Intraprocedural, source-order, monotonic (no taint kill); container literals,
+    f-strings, and concatenation propagate for free. Sinks: `requests`/`httpx`/
+    `aiohttp` `.get/.post/.put/.patch/.delete/.request/.head/.options`,
+    `urllib.request.urlopen`/`Request` (the `HI009` vocabulary). Reuses the `CR040`
+    destination machinery (`_reputation_bad_dest`/`_public_ip_in`) and derives
+    `_EXFIL_HOST_RES` **from** the `CR026`/`CR034`/`CR038` line rules — one source of
+    truth, no parallel host table.
+  - **Additive only**: never suppresses or downgrades a line/AST finding (`HI009`
+    still fires on every network call); the URL position is excluded from payload
+    taint, so a configurable env→URL endpoint with a non-secret body is not a false
+    CRITICAL.
+- `examples/evil-taint/` — a clean `SKILL.md` shipping `scripts/upload.py` with seven
+  credential→bad/dynamic-dest chains (`TF001`: public IP, user-URL, f-string dest,
+  hex-IP, punycode, `webhook.site`, urllib) plus two benign-shaped egresses
+  (`TF002`: a named API in an `Authorization` header, a loopback dev callback) that
+  prove the named/loopback destinations are **not** over-escalated to CRITICAL.
+- `examples/clean-taint/` — credential reads that never reach a network sink (no
+  `requests`/`httpx`/`urllib` at all) → exit 0, zero `TF` findings.
+- CI: `evil-taint` must exit 3 with `TF001`≥6 + `TF002` + per-destination-form
+  snippet asserts + named-host/loopback discrimination (`TF002` not `TF001`);
+  `clean-taint` must exit 0 with no `TF` leakage.
+- `docs/specs/2026-06-19-taint-flow.md`; `references/red-flags.md` rows;
+  `references/patch-templates.md` § taint TF002; `THREAT_MODEL.md` rows + acceptable
+  + out-of-scope; `README.md` Limitations; `SKILL.md` Step + Limitations.
+
 ## [1.7.0] — 2026-06-13
 
 Deepens an existing pass: **MCP / hook destination reputation**.

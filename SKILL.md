@@ -331,6 +331,28 @@ adds **no** false positives on skills that merely *document* these patterns (lik
 this one). Treat `AST001`–`AST004`/`AST008` (CRITICAL) as RED, the rest as HIGH —
 same judgment as their regex equivalents.
 
+**Taint / data-flow pass (`TF0xx` findings).** The AST pass classifies one call at
+a time; it cannot see that a value came from a secret. `scan.py`'s `taint_scan`
+(v1.8.0) connects a **credential source** (`os.environ[...]`, `os.getenv`,
+`os.environ.get`) to a **network sink** (`requests`/`httpx`/`aiohttp`,
+`urllib.request.urlopen`/`Request`) across intervening assignments, container
+literals, f-strings, and concatenation — so a secret read in one line, packaged in
+the next, and shipped in a third is caught:
+
+| Rule | Catches | Severity |
+|---|---|---|
+| `TF001` | credential → network sink at a **reputation-bad / user-controlled** destination (bare/encoded public IP, punycode host, known exfil host, or a non-literal URL) | CRITICAL → RED |
+| `TF002` | credential → network sink at a **hardcoded named** host (incl. loopback) — the legit authenticated-API-client shape | HIGH |
+
+**Judgment:** `TF001` is exfiltration — RED. `TF002` is the legit-client shape, so
+it is **HIGH, not auto-RED**: confirm the named destination is the credential's own
+service (a vendor SDK posting its own token is fine; a secret going to an unrelated
+host is not). The pass is **intraprocedural and single-file** — a secret passed
+through a function call or across modules is *not* tracked, so a clean taint scan is
+not proof of no exfil; keep reading. The URL position is excluded from payload taint,
+so a configurable endpoint read from the environment
+(`requests.post(os.environ["API_URL"], json=data)`) is not flagged.
+
 ---
 
 ## Step 5.5 — Tool laundering check (effective capability)
@@ -578,5 +600,6 @@ echo "✅ <skill-name> installed"
    These are documentation/install templates, not executable code. Discount them for self-audit only — never for any other skill.
 
 6. **Documentation skills (security guides, threat catalogs) will trigger false positives.** A skill whose purpose is to document attack patterns (this checker, future security training skills) will trip the static rules. The auditor reads through them manually in Step 5; verdict is up to LLM judgment, not the raw exit code.
+7. **Taint analysis is intraprocedural and single-file (Phase H).** `taint_scan` (`TF001`/`TF002`) catches a credential→network exfil split across variables, but only within one function/module and one file. A secret laundered through a **function call** (`send(os.environ["X"])`), an **imported helper**, or **container mutation** (`d["k"]=secret; post(d)`) is **not** traced, and only **credential→network** flows are modelled (file-read→network, input→exec, write-to-disk are out of scope). A clean `TF` result is not proof of no exfiltration — Step 5's manual read remains the backstop.
 
 Always include a brief version of these limitations in the final output.
