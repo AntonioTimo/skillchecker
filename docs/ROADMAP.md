@@ -17,6 +17,7 @@ out of scope" item or a spec "Non-goals" line.
 | F | Supply-chain: bundled dependency manifests | 1.6.0 |
 | G | MCP / hook destination reputation (`CR040`) | 1.7.0 |
 | H | Taint / data-flow: credential → network exfil (`TF001`/`TF002`) | 1.8.0 |
+| I | Self-targeting prose + self-modification + activation-surface (`HI024`/`HI025`/`ME013`/`ME014`/`ME015`/`AST009`) — borrow-from-SkillSpector | 1.9.0 |
 
 ## v3 candidates
 
