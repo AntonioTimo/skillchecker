@@ -18,6 +18,7 @@ out of scope" item or a spec "Non-goals" line.
 | G | MCP / hook destination reputation (`CR040`) | 1.7.0 |
 | H | Taint / data-flow: credential → network exfil (`TF001`/`TF002`) | 1.8.0 |
 | I | Self-targeting prose + self-modification + activation-surface (`HI024`/`HI025`/`ME013`/`ME014`/`ME015`/`AST009`) — borrow-from-SkillSpector | 1.9.0 |
+| J | Ecosystem hardening — forged-instruction prose, `os.exec`/Zip-Slip, MCP secret-egress, Phantom Gyp, reverse-shell + staging hosts (`CR041`–`CR044`/`HI026`–`HI029`/`AST010`/`AST011`) | 1.10.0 |
 
 ## v3 candidates
 

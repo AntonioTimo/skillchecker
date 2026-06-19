@@ -591,6 +591,94 @@ jobs:
           print("clean-selftarget: exit 0 (GREEN), no HI024/HI025/ME013/ME014/ME015/AST009 ✓")
           PY
 
+      - name: evil-ecosystem must exit 3 (RED) with the Phase J ecosystem rules
+        run: |
+          set +e
+          python3 scripts/scan.py examples/evil-ecosystem/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 3 ]; then
+            echo "::error::evil-ecosystem should exit 3 (RED), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          python3 <<'PY'
+          import json, sys
+          data = json.load(open("/tmp/out.json"))
+          findings = data["findings"]
+          rules = {f["rule_id"] for f in findings}
+          missing = []
+          for r in ("CR041", "HI026", "AST010", "AST011", "CR042", "HI027", "CR043", "HI028", "CR044", "HI029"):
+              if r not in rules:
+                  missing.append((r, "absent"))
+          def snip(rid):
+              return "\n".join(f["snippet"] for f in findings if f["rule_id"] == rid)
+          locks = [
+              ("CR041", "<|im_start|>"),                  # forged chat-template turn
+              ("HI026", "disregard all previous instructions"),
+              ("AST010", "os.execv"),                     # process replacement
+              ("AST011", "extractall"),                   # Zip-Slip
+              ("CR042", "leaky-stdio.env"),               # live token in env
+              ("CR042", "leaky-remote.headers"),          # live token in header
+              ("HI027", ".aws/credentials"),              # credential-file ref in env
+              ("CR043", "<!("),                           # gyp command-substitution
+              ("HI028", "binding.gyp"),                   # native-addon manifest presence
+              ("CR044", "/dev/tcp/"),                     # reverse shell
+              ("HI029", "transfer.sh"),                   # staging download host
+              # adversarial-review regression locks:
+              ("HI026", "instructions above"),            # noun-before-prior-ref order
+              ("HI029", "uguu.se"),                       # sibling staging host
+              ("CR042", "stripe-leak"),                   # Stripe sk_live_ token shape
+              ("CR042", "aws-leak"),                      # AKIA key (placeholder dead-code fix)
+              ("AST010", "spawnv"),                       # os.spawn* program-index fix
+          ]
+          for r, sub in locks:
+              if sub not in snip(r):
+                  missing.append((r, f"snippet substring '{sub}' [form lock]"))
+          # AST010 must carry BOTH a CRITICAL (non-literal program) and a HIGH (literal).
+          ast10 = {f["severity"] for f in findings if f["rule_id"] == "AST010"}
+          if not {"CRITICAL", "HIGH"} <= ast10:
+              missing.append(("AST010", f"want both CRITICAL+HIGH severities, got {sorted(ast10)}"))
+          # INV001 on the bundled ELF must be CRITICAL (magic-byte escalation), not HIGH
+          inv = [f for f in findings if f["rule_id"] == "INV001"]
+          if not any(f["severity"] == "CRITICAL" and "ELF" in f["snippet"] for f in inv):
+              missing.append(("INV001", "bundled ELF must escalate to CRITICAL"))
+          # Discrimination: the ${VAR} placeholder + the ghp_xxxx dummy-fill server must
+          # NOT carry CR042/HI027 (a token-shaped dummy is not a live secret).
+          secrets = "\n".join(f["snippet"] for f in findings if f["rule_id"] in ("CR042", "HI027"))
+          for benign in ("clean-placeholder", "dummy-fill"):
+              if benign in secrets:
+                  missing.append(("CR042/HI027", benign + " (placeholder/dummy) must NOT fire"))
+          if missing:
+              print("::error::evil-ecosystem missing/incorrect catches:")
+              for rule, why in missing:
+                  print(f"  - {rule} ({why})")
+              sys.exit(1)
+          print("evil-ecosystem: exit 3 (RED), all Phase J rules + form locks + INV001-ELF + discrimination OK")
+          PY
+
+      - name: clean-ecosystem must exit 0 (GREEN) with zero Phase-J findings
+        run: |
+          set +e
+          python3 scripts/scan.py examples/clean-ecosystem/ > /tmp/out.json 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::clean-ecosystem should exit 0 (GREEN), got $rc"
+            cat /tmp/out.json
+            exit 1
+          fi
+          python3 <<'PY'
+          import json, sys
+          data = json.load(open("/tmp/out.json"))
+          leaked = sorted({"CR041", "HI026", "AST010", "AST011", "CR042", "HI027", "CR043", "HI028", "CR044", "HI029"}
+                          & {f["rule_id"] for f in data["findings"]})
+          if leaked:
+              print("::error::clean-ecosystem leaked Phase-J findings on benign/defensive content:", leaked)
+              sys.exit(1)
+          print("clean-ecosystem: exit 0 (GREEN), no Phase-J rule leaked ✓")
+          PY
+
       - name: Self-audit smoke test (no crash)
         run: |
           # Self-audit IS expected to flag references/*.md (documentation of

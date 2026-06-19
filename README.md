@@ -223,6 +223,7 @@ skill-checker/
 │   ├── evil-supplychain/ + clean-supplychain/ ← bundled-manifest install scripts / non-registry sources vs. pinned registry deps
 │   ├── evil-taint/ + clean-taint/        ← credential→network exfil flow (TF001/TF002) / credential reads with no sink
 │   ├── evil-selftarget/ + clean-selftarget/ ← self-prompt-leak/persist/self-rewrite/catch-all (HI024/HI025/ME013-015/AST009) / defensive + skill-builder
+│   ├── evil-ecosystem/ + clean-ecosystem/ ← forged-token/os.exec/MCP-secret/Phantom-Gyp/reverse-shell (CR041-044/HI026-029/AST010-011) / defensive + safe forms
 │   └── evil-bypass/                      ← regression set for previously-evaded patterns
 └── docs/
     └── HOWTO.md          ← user-facing guide

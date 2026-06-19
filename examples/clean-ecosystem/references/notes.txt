@@ -1,0 +1,3 @@
+Release notes
+=============
+This skill extracts archives safely.

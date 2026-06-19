@@ -436,6 +436,42 @@ env (`requests.post(os.environ["API_URL"], json=data)`) с не-секретны
 
 ---
 
+## § Ecosystem hardening (CR041-044 / HI026-029 / AST010 / AST011)
+
+Почти всё здесь — **refuse (RED)**, не патч:
+
+- **CR041** (forged chat-template токен), **CR042** (живой токен в MCP env/headers),
+  **CR043** (`<!(` в binding.gyp), **CR044** (`/dev/tcp`/`nc -e`), **AST010**
+  non-literal exec — удалить, не патчить вокруг. У скилла нет легитимной причины
+  подделывать role-boundary, зашивать секрет в конфиг, исполнять shell на install
+  или открывать reverse-shell. Если это документация атаки — поставить негацию перед
+  фразой (для CR041), negation-guard снимет.
+- **HI026** (override-грамматика): убрать «disregard all previous instructions». Если
+  это легитимная инструкция вроде «ignore the previous warning» — она и так не ловится
+  (нет instruction-noun + сильного prior-ref).
+- **AST010** (литеральный exec): заменить `os.execv("/bin/sh", …)` на
+  `subprocess.run([...], timeout=…)` с argument-list, без подмены образа процесса.
+- **AST011** (Zip-Slip): добавить `filter="data"` (Py 3.12+) или `members=<валидируемый список>`
+  в `extractall`; не извлекать архив целиком из недоверенного источника.
+- **HI027** (cred-file/bad-dest в MCP env/headers): убрать путь к креденшелу/хост; MCP
+  читает секрет из окружения пользователя, не из shipped-конфига.
+- **HI028** (binding.gyp): удалить — скилл это `SKILL.md` + `scripts/` + `references/`,
+  не npm-аддон.
+- **HI029** (staging-хост): не тянуть stage-2 с анонимного file-staging; вендорить и
+  аудировать payload явно.
+
+```yaml
+# Было (CR042): живой токен в MCP-конфиге
+env: { GITHUB_TOKEN: "ghp_AbCd...realtoken..." }
+# Стало: ссылка на окружение пользователя (placeholder — не флагается)
+env: { GITHUB_TOKEN: "${GITHUB_TOKEN}" }
+```
+
+Bundled исполняемый файл (INV001 → CRITICAL по magic-bytes) — удалить бинарь;
+скилл должен быть текстовым и аудируемым.
+
+---
+
 ## § Self-targeting prose / self-modification / activation (HI024/HI025/ME013/ME014/ME015/AST009)
 
 **Когда нужно:** SKILL.md-проза приказывает модели слить/закрепить/переписать себя,
