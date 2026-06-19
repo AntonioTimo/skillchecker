@@ -163,7 +163,10 @@ This checker does not catch every threat class. It catches the common ones, fast
    audit dependencies separately (`pip-audit` / `npm audit`).
 3. **LLM judgment is fallible.** Adversarial code can mimic benign code.
    When the static scan flags multiple HIGH findings, even if individually
-   explainable, treat it as a pattern.
+   explainable, treat it as a pattern. The v1.8.0 taint pass (`TF001`/`TF002`)
+   catches a credential→network exfil split across variables, but only
+   **intraprocedurally and single-file** — a secret laundered through a function
+   call or another module still relies on the LLM-side read.
 4. **Update means re-audit.** A skill that was 🟢 yesterday may be 🔴 today.
    Re-run after any upstream update.
 5. **Self-audit is a known edge case.** Running `/skill-checker` against
@@ -218,6 +221,7 @@ skill-checker/
 │   ├── evil-exfil/ + clean-exfil/        ← modern exfil / local-dev URLs
 │   ├── evil-evasion/ + clean-evasion/    ← NFKC / homoglyph / metadata-SSRF / scheme-less IP vs. legit compat + named hosts
 │   ├── evil-supplychain/ + clean-supplychain/ ← bundled-manifest install scripts / non-registry sources vs. pinned registry deps
+│   ├── evil-taint/ + clean-taint/        ← credential→network exfil flow (TF001/TF002) / credential reads with no sink
 │   └── evil-bypass/                      ← regression set for previously-evaded patterns
 └── docs/
     └── HOWTO.md          ← user-facing guide
