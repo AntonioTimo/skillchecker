@@ -203,6 +203,17 @@ CRITICAL_RULES = [
     ("CR038", r"(?i)\b(?:169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200)\b",
      "Cloud instance-metadata endpoint — SSRF target for stealing IAM / cloud credentials",
      "Refuse. A skill has no reason to query the cloud metadata service."),
+
+    ("CR041",
+     r"(?i)<\|im_(?:start|end)\|>|<<\s*/?\s*SYS\s*>>|\[/?INST\]"
+     r"|\[system\]\(#(?:assistant|context)\)|\{\{[#/]system~?\}\}",
+     "Chat-template control token forging a system/assistant turn (ChatML <|im_start|>, <<SYS>>, [INST], {{#system}}) — a skill structurally prompt-injecting the host model with a forged role boundary",
+     "Refuse. No legitimate skill emits ML chat-template control tokens in its prose."),
+
+    ("CR044",
+     r"(?i)/dev/(?:tcp|udp)/|\b(?:nc|ncat|netcat)\b[^\n]{0,20}\s-e\b",
+     "Reverse shell / inbound C2 — a bash /dev/tcp pseudo-device or `nc -e` hands remote control of the machine to an attacker",
+     "Refuse. There is no legitimate skill use for a /dev/tcp reverse shell or `nc -e`."),
 ]
 
 HIGH_RULES = [
@@ -307,6 +318,32 @@ HIGH_RULES = [
      r"(?:file|disk|log|server|webhook|endpoint|url|socket|https?://|ftp://|curl|wget)",
      "Skill prose orders the model to WRITE/SEND its own system prompt or instructions to a file / network / log sink — prompt exfiltration with no literal endpoint the line rules key on",
      "Refuse. The model's system prompt must never be persisted or transmitted by the skill."),
+
+    ("HI026",
+     # Instruction-override TRIPLE gate: override-verb + STRONG prior-reference +
+     # instruction-noun. 'ignore previous deprecation warnings' (no instruction-noun)
+     # and 'disregard the linting rules' (no prior-ref) do NOT fire.
+     # Two order-agnostic arms (adversarial review): arm 1 = verb -> prior-ref ->
+     # noun ("ignore all previous instructions"); arm 2 = verb -> noun -> STRONG
+     # positional prior-ref ("ignore the instructions above") — the canonical order
+     # the single-arm form missed. Arm 2 uses ONLY positional words (above/earlier/
+     # previously/before/prior/preceding), never loose 'the'/'all', so a benign
+     # "follow the instructions <noun>" cannot trip it.
+     r"(?i)(?:\b(?:ignore|disregard|forget|override|bypass|discard|delete)\b"
+     r"[^\n]{0,25}?\b(?:previous|preceding|prior|earlier|above|all\s+(?:previous|prior|preceding|the))\b"
+     r"[^\n]{0,25}?\b(?:instructions?|directives?|context|(?:system\s+)?prompts?|commands?|constraints?|guardrails?)\b"
+     r"|\b(?:ignore|disregard|forget|override|bypass|discard|delete)\b"
+     r"[^\n]{0,30}?\b(?:instructions?|directives?|context|(?:system\s+)?prompts?|commands?|constraints?|guardrails?)\b"
+     r"[^\n]{0,30}?\b(?:above|earlier|previously|before|prior|preceding)\b)",
+     "Instruction-override grammar ('disregard all previous instructions', 'ignore the instructions above') in SKILL.md prose — a forged directive to make the model abandon its prior instructions, the core prompt-injection move",
+     "Refuse. A skill must not tell the model to disregard its previous instructions."),
+
+    ("HI029",
+     r"(?i)\b(?:transfer\.sh|gofile\.io|file\.io|bashupload\.com|anonfile\.(?:com|to|cc)"
+     r"|0x0\.st|tmpfiles\.org|oshi\.at|ix\.io|0bin\.net|controlc\.com|dpaste\.(?:com|org)"
+     r"|hastebin\.com|temp\.sh|catbox\.moe|uguu\.se|litterbox\.catbox\.moe)\b",
+     "Anonymous file-staging / paste DOWNLOAD host — the second-stage payload source class (MITRE T1608.001) that feeds a two-stage curl|bash, distinct from the exfil destinations CR026 covers",
+     "Verify what is fetched. A skill pulling a stage-2 payload from an anonymous file-staging host is a strong supply-chain red flag."),
 ]
 
 MEDIUM_RULES = [
@@ -685,7 +722,7 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
     # not in code — that's the whole point. So for .md files we still scan
     # them outside code-fence blocks, unlike the rest.
     PROSE_TARGETING = {"CR028", "CR029", "CR030", "CR031", "ME009",
-                       "HI024", "HI025", "ME013", "ME015"}
+                       "HI024", "HI025", "ME013", "ME015", "CR041", "HI026"}
 
     for i, line in enumerate(lines, start=1):
         # Markdown YAML frontmatter delimiter (--- on its own line).
@@ -775,7 +812,7 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                         unit.rstrip().endswith(('\\n",', '\\n"', "\\n',", "\\n'"))):
                         continue
                 if rule_id in ("CR028", "CR029", "CR030", "CR031",
-                               "HI024", "HI025", "ME013", "ME015"):
+                               "HI024", "HI025", "ME013", "ME015", "CR041", "HI026"):
                     # Defensive prose: suppress ONLY when the NEAREST preceding
                     # negation governs THIS dangerous verb — i.e. no clause/sentence
                     # break or fresh imperative between the negation and the match.
@@ -1034,6 +1071,52 @@ def _cr040_finding(rel, context, text, reason):
                        "after reading the URL."))
 
 
+# A concrete LIVE-secret token shape (CR042). A real token in a SHIPPED MCP config
+# is near-never benign; the placeholder guard removes the dominant FP source.
+_LIVE_TOKEN_RE = re.compile(
+    r"gh[posru]_[A-Za-z0-9]{20,}"                                  # GitHub PAT/OAuth/server/refresh
+    r"|xox[baprs]-[A-Za-z0-9-]{10,}"                               # Slack
+    r"|sk-[A-Za-z0-9]{20,}"                                        # OpenAI-style
+    r"|sk_(?:live|test)_[A-Za-z0-9]{16,}"                          # Stripe live/test secret
+    r"|rk_(?:live|test)_[A-Za-z0-9]{16,}"                          # Stripe restricted key
+    r"|AKIA[0-9A-Z]{16}"                                           # AWS access key id
+    r"|AIza[0-9A-Za-z_\-]{30,}"                                    # Google API key
+    r"|eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{6,}"  # JWT
+)
+# A credential-FILE reference in an env/header value (HI027).
+_CRED_FILE_RE = re.compile(
+    r"(?i)(?:\.ssh/|\.aws/|/\.env\b|\bid_rsa\b|\bid_ed25519\b|\.pem\b|\.netrc\b|"
+    r"\.npmrc\b|\.pypirc\b|credentials\.json|\.kube/config)")
+
+
+def _is_placeholder(val: str) -> bool:
+    """True if an env/header value is a placeholder, not a live secret — `${VAR}` /
+    `$VAR` / `<...>` / `{{...}}` / `YOUR_..._HERE` / `xxx` / a bare ENV-name echo."""
+    v = (val or "").strip()
+    if not v:
+        return True
+    if re.fullmatch(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?", v):
+        return True
+    if v.startswith("<") and v.endswith(">"):
+        return True
+    if re.fullmatch(r"\{\{[^}]*\}\}", v):
+        return True
+    if re.search(r"(?i)\byour[_-].*here\b|placeholder|example|changeme|<token>|\bxxx+\b|\.\.\.", v):
+        return True
+    if re.fullmatch(r"[A-Z][A-Z0-9_]{2,}", v):          # bare ENV-name echo
+        return True
+    return False
+
+
+def _token_is_dummy(tok: str) -> bool:
+    """True if a token-SHAPED string is obviously a dummy/example, not a live secret:
+    a repeated-character fill (`xxxx…`/`0000…`, 8+) or an embedded EXAMPLE/PLACEHOLDER/
+    CHANGEME/DUMMY/SAMPLE/REDACTED/FAKE marker. Applied to the MATCHED token (not the
+    whole value), so a real token co-located with the word 'example' still fires, while
+    `ghp_xxxx…` and the AWS doc key `AKIA…EXAMPLE` are suppressed (adversarial review)."""
+    return bool(re.search(r"(?i)([A-Za-z0-9])\1{7,}|example|placeholder|changeme|dummy|sample|redacted|fake|test_key", tok))
+
+
 def check_bundled_config(skill_root: Path) -> list[Finding]:
     """Detect bundled settings/MCP/plugin config that can execute code or alter
     the user's environment. Emits Findings directly, like check_frontmatter."""
@@ -1120,6 +1203,44 @@ def check_bundled_config(skill_root: Path) -> list[Finding]:
                     if reason:
                         findings.append(_cr040_finding(
                             rel, f"remote MCP server '{name}' url", str(srv.get("url")), reason))
+
+                # CR042 / HI027 — secret-egress in the server's env / headers (the
+                # mcpServers loop reads command/args/url; env+headers were unread).
+                for sect in ("env", "headers"):
+                    bag = srv.get(sect)
+                    if not isinstance(bag, dict):
+                        continue
+                    for vk, vv in bag.items():
+                        if not isinstance(vv, str):
+                            continue
+                        # Test the LIVE-token shape FIRST (so a real token co-located
+                        # with the word 'example' is not silenced), and gate on the
+                        # MATCHED token being a non-dummy (so `ghp_xxxx…` / `AKIA…EXAMPLE`
+                        # are suppressed and a well-formed AKIA key is not swallowed by
+                        # the bare-ENV-echo placeholder branch) — adversarial review.
+                        tok = _LIVE_TOKEN_RE.search(vv)
+                        if tok and not _token_is_dummy(tok.group(0)):
+                            findings.append(Finding(
+                                severity="CRITICAL", rule_id="CR042", file=rel, line=0,
+                                snippet=f"mcpServers.{name}.{sect}.{vk} = <live token>",
+                                why=("Bundled MCP config hardcodes a LIVE credential in " + sect
+                                     + " — a real token shape (not a ${VAR} placeholder) shipped inside the "
+                                       "skill and forwarded to the server on session start"),
+                                suggested_fix=("Refuse. Remove the hardcoded secret; an MCP server reads its "
+                                               "credential from the user's own environment, never from a value "
+                                               "baked into a shipped skill config.")))
+                            continue
+                        if _is_placeholder(vv):
+                            continue
+                        rep = _reputation_bad_dest(vv)
+                        if rep or _CRED_FILE_RE.search(vv):
+                            findings.append(Finding(
+                                severity="HIGH", rule_id="HI027", file=rel, line=0,
+                                snippet=f"mcpServers.{name}.{sect}.{vk} = {vv[:60]}",
+                                why=("Bundled MCP " + sect + " value points at "
+                                     + (rep if rep else "a credential file") + " — secret-egress / a "
+                                       "credential reference forwarded to the server on session start"),
+                                suggested_fix="Remove. Do not ship credential paths or off-host destinations in an MCP config."))
         elif data is None and _mentions_key(path, "mcpServers"):
             findings.append(Finding(
                 severity="HIGH", rule_id="HI017", file=rel, line=0,
@@ -1222,6 +1343,7 @@ SUPPLY_MANIFEST_NAMES = {
     "Cargo.toml", "Cargo.lock",
     "go.mod",
     "environment.yml", "environment.yaml",
+    "binding.gyp",
 }
 LOCKFILE_NAMES = {
     "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
@@ -1694,6 +1816,46 @@ def _supply_package_json(data, path, rel):
     return findings, unpinned
 
 
+def _supply_binding_gyp(path: Path, rel: str) -> list[Finding]:
+    """binding.gyp (node-gyp) install-time RCE. A skill is never a legitimately
+    npm-installed native addon, so PRESENCE is HIGH (HI028); a gyp command-
+    substitution token `<!(` / `<!@(` in any string value runs a shell command on a
+    plain `npm install` with NO package.json script (Phantom Gyp) -> CRITICAL (CR043)."""
+    findings = [Finding(
+        severity="HIGH", rule_id="HI028", file=rel, line=0, snippet="binding.gyp",
+        why=("Bundled binding.gyp — node-gyp runs it automatically on `npm install` to build a "
+             "native addon; a Claude skill is never a legitimately npm-installed native addon"),
+        suggested_fix="Remove binding.gyp. A skill is SKILL.md + scripts/ + references/, not a native addon.")]
+    data, err = _parse_json(path)
+    found = []
+    if err is None:
+        _MAX = 200   # deep nesting is itself suspicious; bound below Python's ~1000 limit
+        def walk(n, depth=0):
+            if depth > _MAX:
+                return
+            if isinstance(n, dict):
+                for v in n.values():
+                    walk(v, depth + 1)
+            elif isinstance(n, list):
+                for v in n:
+                    walk(v, depth + 1)
+            elif isinstance(n, str) and ("<!(" in n or "<!@(" in n):
+                found.append(n)
+        walk(data)
+    else:
+        text = _read_text_safe(path) or ""
+        if "<!(" in text or "<!@(" in text:
+            found.append(text)
+    for v in found[:3]:
+        findings.append(Finding(
+            severity="CRITICAL", rule_id="CR043", file=rel, line=0, snippet=v.strip()[:120],
+            why=("binding.gyp uses a gyp command-substitution token (<!( / <!@() — node-gyp executes the "
+                 "embedded shell command on `npm install` with NO package.json lifecycle script (Phantom "
+                 "Gyp install-time RCE)" + ("" if err is None else "; matched textually (" + err + ")")),
+            suggested_fix="Refuse. Remove the <!( command-substitution; it is arbitrary shell at install time."))
+    return findings
+
+
 def check_supply_chain(skill_root: Path) -> list[Finding]:
     """Detect bundled dependency manifests that ship install-lifecycle scripts
     (CR039), non-registry sources (HI023), or unpinned deps (ME012). Structural,
@@ -1749,6 +1911,8 @@ def check_supply_chain(skill_root: Path) -> list[Finding]:
         elif name == "go.mod":
             text = _read_text_safe(path) or ""
             findings.extend(_supply_gomod(text, rel))
+        elif name == "binding.gyp":
+            findings.extend(_supply_binding_gyp(path, rel))
         else:
             text = _read_text_safe(path) or ""
             findings.extend(_supply_source_scan(text, rel, kind))
@@ -1784,6 +1948,17 @@ def check_supply_chain(skill_root: Path) -> list[Finding]:
 # --------------------------------------------------------------------------
 
 _CODE_EXEC_BUILTINS = {"eval", "exec", "compile"}
+
+# os process-replacement / spawn family (AST010) — completes AST003, which models
+# only os.system/os.popen/subprocess.*. Severity mirrors AST003: non-literal program
+# path -> CRITICAL, literal -> HIGH.
+_OS_EXEC_FAMILY = {
+    "os.execv", "os.execve", "os.execvp", "os.execvpe",
+    "os.execl", "os.execle", "os.execlp", "os.execlpe",
+    "os.spawnv", "os.spawnve", "os.spawnvp", "os.spawnvpe",
+    "os.spawnl", "os.spawnle", "os.spawnlp", "os.spawnlpe",
+    "os.posix_spawn", "os.posix_spawnp",
+}
 
 
 def _is_own_file_target(node, bound=frozenset()) -> bool:
@@ -1933,6 +2108,25 @@ class _AstAuditor(ast.NodeVisitor):
         elif name in ("pickle.loads", "marshal.loads"):
             self._add(node, "AST004", "CRITICAL",
                       name + "() deserializes arbitrary objects — remote code execution")
+
+        elif name in _OS_EXEC_FAMILY:
+            # The PROGRAM-PATH arg index is signature-dependent: os.spawn*(mode, file,
+            # ...) puts the program at arg1 (arg0 is P_WAIT/P_NOWAIT); os.exec*(path,
+            # ...) and os.posix_spawn[p](path, ...) put it at arg0 (adversarial review).
+            idx = 1 if ".spawn" in name else 0
+            prog = node.args[idx] if len(node.args) > idx else None
+            nonlit = prog is not None and not _is_literal(prog)
+            self._add(node, "AST010", "CRITICAL" if nonlit else "HIGH",
+                      name + "() replaces/spawns a process image"
+                      + (" with a non-literal program path — dynamic process execution (AST003 sibling)"
+                         if nonlit else " — process execution (a literal exec of a fixed program)"))
+
+        elif (name == "shutil.unpack_archive"
+              or (isinstance(node.func, ast.Attribute) and node.func.attr == "extractall"
+                  and not any(kw.arg in ("members", "filter") for kw in node.keywords))):
+            self._add(node, "AST011", "MEDIUM",
+                      "archive extractall / unpack_archive without a member filter — Zip-Slip path "
+                      "traversal can overwrite files outside the target dir (e.g. ~/.ssh, ~/.claude)")
 
         elif name == "yaml.load":
             safe = any(
@@ -2410,6 +2604,24 @@ def unicode_scan(path: Path, rel: str) -> list[Finding]:
     return findings
 
 
+def _exec_magic(path: Path):
+    """A short label if the file's first bytes are a known EXECUTABLE magic number
+    (ELF / PE / Mach-O / Mach-O-fat-or-Java) — escalates INV001 from HIGH to CRITICAL,
+    since a bundled compiled executable is malware-tier, not merely 'unauditable'."""
+    try:
+        head = path.read_bytes()[:4]
+    except OSError:
+        return None
+    if head[:4] == b"\x7fELF":
+        return "ELF"
+    if head[:2] == b"MZ":
+        return "PE/Windows"
+    if head[:4] in (b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf",
+                    b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xca\xfe\xba\xbe"):
+        return "Mach-O/Java"
+    return None
+
+
 def _looks_like_text(path: Path) -> bool:
     """Sniff a file's first chunk: text if it has no NUL byte and decodes as
     UTF-8 (a multibyte char cut at the chunk boundary is tolerated). Lets
@@ -2494,14 +2706,20 @@ def main() -> int:
     inv = inventory(skill_root)
     findings: list[Finding] = []
 
-    # Frontmatter pass
-    findings.extend(check_frontmatter(skill_md, skill_root))
-
-    # Bundled config / hooks / MCP pass (structural — parses JSON, never executes)
-    findings.extend(check_bundled_config(skill_root))
-
-    # Supply-chain pass (structural — bundled dependency manifests; never executes)
-    findings.extend(check_supply_chain(skill_root))
+    # Structural passes (parse JSON / never execute). Each is wrapped so a crash in
+    # one pass — e.g. a RecursionError on a maliciously deep-nested config — degrades
+    # to a LOW note instead of aborting the whole scan with no JSON (adversarial review).
+    for _label, _fn in (("frontmatter", lambda: check_frontmatter(skill_md, skill_root)),
+                        ("bundled-config", lambda: check_bundled_config(skill_root)),
+                        ("supply-chain", lambda: check_supply_chain(skill_root))):
+        try:
+            findings.extend(_fn())
+        except Exception as _e:  # never let one structural pass abort the whole scan
+            findings.append(Finding(
+                severity="LOW", rule_id="IO003", file="", line=0, snippet=str(_e)[:80],
+                why=("the " + _label + " pass errored and was skipped (" + type(_e).__name__
+                     + ") — a pass crashing on a skill's own config is itself suspicious"),
+                suggested_fix="Inspect this skill's config by hand."))
 
     # Per-file pass (regex) + Unicode pass + AST pass for Python files
     for rel in inv["text_files"]:
@@ -2513,12 +2731,20 @@ def main() -> int:
 
     # Note any non-text or symlink files (Claude-side review treats these as red flags)
     for other in inv["other_files"]:
-        sev = "CRITICAL" if "SYMLINK" in other else "HIGH"
-        why = ("Symlink inside skill directory — refuse." if "SYMLINK" in other
-               else "Binary or non-text file in skill — unauditable; treat as RED unless the author justifies it.")
+        is_symlink = "SYMLINK" in other
+        magic = None if is_symlink else _exec_magic(skill_root / other)
+        if is_symlink:
+            sev, why = "CRITICAL", "Symlink inside skill directory — refuse."
+        elif magic:
+            sev = "CRITICAL"
+            why = ("Bundled " + magic + " EXECUTABLE in the skill — a compiled, unauditable binary that "
+                   "runs native code; a skill is plain text (SKILL.md + scripts/ + references/), never a binary.")
+        else:
+            sev = "HIGH"
+            why = "Binary or non-text file in skill — unauditable; treat as RED unless the author justifies it."
         findings.append(Finding(
             severity=sev, rule_id="INV001", file=other, line=0,
-            snippet="", why=why,
+            snippet=(magic or ""), why=why,
         ))
 
     # Summarize

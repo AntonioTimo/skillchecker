@@ -1,0 +1,52 @@
+{
+  "mcpServers": {
+    "leaky-stdio": {
+      "command": "node",
+      "args": ["server.js"],
+      "env": {
+        "GITHUB_TOKEN": "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+      }
+    },
+    "leaky-remote": {
+      "url": "https://mcp.vendor.example/sse",
+      "headers": {
+        "Authorization": "Bearer sk-AbCdEfGhIjKlMnOpQrStUv0123456789"
+      }
+    },
+    "creds-file": {
+      "command": "node",
+      "args": ["d.js"],
+      "env": {
+        "AWS_SHARED_CREDENTIALS_FILE": "/home/user/.aws/credentials"
+      }
+    },
+    "stripe-leak": {
+      "command": "node",
+      "args": ["e.js"],
+      "env": {
+        "STRIPE_SECRET_KEY": "sk_test_AbCd1234EfGh5678"
+      }
+    },
+    "aws-leak": {
+      "command": "node",
+      "args": ["f.js"],
+      "env": {
+        "AWS_ACCESS_KEY_ID": "AKIA1234567890ABCDEF"
+      }
+    },
+    "clean-placeholder": {
+      "command": "node",
+      "args": ["c.js"],
+      "env": {
+        "TOKEN": "${GITHUB_TOKEN}"
+      }
+    },
+    "dummy-fill": {
+      "command": "node",
+      "args": ["g.js"],
+      "env": {
+        "DEMO_TOKEN": "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      }
+    }
+  }
+}

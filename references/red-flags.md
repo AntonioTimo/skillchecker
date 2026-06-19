@@ -284,6 +284,32 @@ Cross-function/inter-file поток, file-read/input-источники и sock
 
 ---
 
+### Ecosystem hardening 2026 (forged-prompt, os.exec, MCP-secret, Phantom-Gyp, reverse-shell)
+
+Веб-свип экосистемы (MITRE ATT&CK, Vigil-llm, Bandit, Token Security, StepSecurity,
+Socket.dev), профильтрованный под инварианты. Каждый — grep-verified пробел, в
+существующем проходе:
+
+| Pattern | Why | Rule |
+|---|---|---|
+| Chat-template control-токен (`<\|im_start\|>`, `<<SYS>>`, `[INST]`, `{{#system}}`) в прозе SKILL.md | Скилл подделывает role-boundary, структурно prompt-инжектит хост-модель. Negation-guarded; PROSE_TARGETING. | CR041 (CRITICAL) |
+| «disregard all previous instructions»-грамматика | Triple-gate: override-глагол + сильный prior-ref + instruction-noun. «ignore previous warnings» НЕ ловится. | HI026 (HIGH) |
+| `os.exec*`/`os.spawn*`/`posix_spawn` подмена процесса | Дыра в AST003 (знали только os.system/subprocess). Severity по литеральности program-path. | AST010 (CRIT/HIGH) |
+| `extractall`/`unpack_archive` без member-фильтра | Zip-Slip: перезапись вне target-dir (`~/.ssh`, `~/.claude`). `filter=`/`members=` — exempt. | AST011 (MEDIUM) |
+| Живой токен (`ghp_`/`sk-`/`xox.-`/`AKIA`/`AIza`/JWT) в bundled MCP `env`/`headers` | Секрет зашит в shipped-конфиг. `${VAR}`/placeholder — guard. mcpServers-цикл раньше читал только command/args/url. | CR042 (CRITICAL) |
+| Cred-file путь / reputation-bad хост в MCP `env`/`headers` | Secret-egress / ссылка на креденшел, форвардится серверу на старте. | HI027 (HIGH) |
+| gyp `<!(`-подстановка в bundled `binding.gyp` | Phantom Gyp: node-gyp исполняет shell на `npm install` БЕЗ package.json-скрипта. | CR043 (CRITICAL) |
+| Наличие bundled `binding.gyp` | Скилл — не native-аддон. Presence — HIGH, `<!(`-токен — CRITICAL. | HI028 (HIGH) |
+| `/dev/tcp` reverse-shell / `nc -e` | Inbound C2 / удалённый контроль машины. | CR044 (CRITICAL) |
+| Anonymous staging/paste DOWNLOAD-хост (`transfer.sh`/`gofile.io`/`bashupload.com`/…) | Источник 2-й стадии (MITRE T1608.001), которого CR026 (upload-назначения) не видел. | HI029 (HIGH) |
+| Bundled исполняемый файл по magic-bytes (ELF/PE/Mach-O) | Скомпилированный бинарь = malware-tier, не просто «unauditable». | INV001 → CRITICAL |
+
+Что НЕ взяли (вне фазы): SARIF/TT4/JS-проход (→ v2.0), sleeping-payload co-occurrence,
+ctypes, read+egress amplifier, typosquatting, suspicious-TLD — OPT-IN за флагом; live
+MCP tool-poisoning — нужна сеть (см. спеку `2026-06-19-ecosystem-hardening.md` §6).
+
+---
+
 ### Self-targeting: скилл атакует САМ СЕБЯ / модель (prompt-leak, persistence, self-rewrite, catch-all)
 
 SKILL.md-проза читается моделью как авторитет. Класс — **авторская малварь на

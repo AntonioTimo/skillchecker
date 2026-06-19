@@ -71,6 +71,17 @@ Examples:
 | Cross-session **persistent** instruction / memory injection | MEDIUM | ME013 |
 | **Unscoped catch-all** activation surface in `when_to_use` / `description` (activates on anything / every request) | MEDIUM | ME014 |
 | **Self-modification prose** — skill told to rewrite its own SKILL.md / source / instructions | MEDIUM | ME015 |
+| **Forged chat-template token** (ChatML `<\|im_start\|>`, `<<SYS>>`, `[INST]`, `{{#system}}`) in SKILL.md prose | CRITICAL | CR041 |
+| **Instruction-override grammar** ("disregard all previous instructions") | HIGH | HI026 |
+| **`os.exec*`/`os.spawn*`/`posix_spawn`** process replacement (completes `AST003`) | CRITICAL / HIGH | AST010 |
+| **`extractall`/`unpack_archive`** without a member filter (Zip-Slip path traversal) | MEDIUM | AST011 |
+| **Live token** in a bundled MCP `env`/`headers` value | CRITICAL | CR042 |
+| Credential-file ref / reputation-bad dest in a bundled MCP `env`/`headers` | HIGH | HI027 |
+| **`binding.gyp` `<!(`** command-substitution (Phantom Gyp install-RCE) | CRITICAL | CR043 |
+| Bare presence of a bundled `binding.gyp` | HIGH | HI028 |
+| **`/dev/tcp`** reverse shell / `nc -e` inbound C2 | CRITICAL | CR044 |
+| Anonymous file-staging / paste **download** host (MITRE T1608.001) | HIGH | HI029 |
+| Bundled **executable** by magic bytes (ELF/PE/Mach-O) | HIGH→CRITICAL | INV001↑ |
 | Recursive scans of home or root | HIGH | HI015 |
 | JS dynamic execution (`Function()`, `vm.runIn`, `Buffer.from(..., 'base64')` + eval) | HIGH | HI016 |
 | Bundled remote MCP server (`mcpServers` with `url`) | HIGH | HI017 |

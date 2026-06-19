@@ -18,7 +18,8 @@ docs → PR → squash-merge → GitHub release.
 | F | Supply-chain (bundled dependency manifests) | v1.6.0 | [#6](https://github.com/AntonioTimo/skillchecker/pull/6) | ✅ released |
 | G | MCP / hook destination reputation (CR040) | v1.7.0 | [#8](https://github.com/AntonioTimo/skillchecker/pull/8) | ✅ released |
 | H | Taint / data-flow: credential → network exfil (TF001/TF002) | v1.8.0 | [#9](https://github.com/AntonioTimo/skillchecker/pull/9) | ✅ released |
-| I | Self-targeting prose + self-modification + activation-surface (borrow-from-SkillSpector) | v1.9.0 | — | 🚧 in review |
+| I | Self-targeting prose + self-modification + activation-surface (borrow-from-SkillSpector) | v1.9.0 | [#10](https://github.com/AntonioTimo/skillchecker/pull/10) | ✅ released |
+| J | Ecosystem hardening (2026 supply-chain + prompt-injection + MCP secret-egress) | v1.10.0 | — | 🚧 in review |
 
 ---
 
@@ -488,3 +489,69 @@ target; and a string-`split` frontmatter parse is the same disease as a line-reg
 that drifts — anchor it to the real grammar. Five SS borrows were classified
 SKIP/OPT-IN/needs-LLM and recorded in the spec §6 so the next session does not
 re-litigate them.
+
+## Phase J — Ecosystem hardening (v1.10.0)
+
+**Goal.** Borrow from the *whole field*, not just SkillSpector — but only what we
+must. A 5-lane web sweep (MITRE ATT&CK, Vigil-llm, Bandit, Token Security,
+StepSecurity, Socket.dev, mcp-scan), scoped against our invariants, then a judge.
+
+**The honest verdict.** The judge **argued us out of "v2.0 today"**: every must-take
+is "a few entries in an existing pass", and calling that a major would be version
+inflation, off-brand for a "findings must be believed" culture. So this shipped as a
+**minor v1.10.0 "ecosystem-hardened"**, and **v2.0 is reserved for the JS/TS AST
+pass** — the first second-language parse, a genuine new surface, which forces the
+vendored-parser-vs-dependency decision (a coarse regex JS pass is rejected per the
+HI019 lesson). The maintainer agreed.
+
+**The gap (RED).** Six grep-verified false-negative classes, each completing a
+surface opened one field short: `os.exec*`/`spawn*` (only `os.system`/`subprocess`
+modelled — `AST010`); `extractall` Zip-Slip (`AST011`); the `mcpServers` `env`/
+`headers` (only `command`/`args`/`url` read — `CR042`/`HI027` secret-egress);
+`binding.gyp` (only `package.json` lifecycle scripts — `CR043`/`HI028` Phantom Gyp);
+the download/staging host class (only exfil *destinations* — `HI029`) and `/dev/tcp`
+inbound C2 (`CR044`); plus two new prose primitives — forged ChatML control tokens
+(`CR041`) and the "disregard all previous instructions" override (`HI026`). And an
+`INV001` magic-byte escalation (a bundled ELF/PE/Mach-O → CRITICAL).
+
+**The fix (GREEN).** Ten rules across the existing passes, no new subsystem; each
+grounded in a cited source. The prose rules join `PROSE_TARGETING` + the clause-aware
+negation guard; `CR042` reuses the `CR040`/`CR025` machinery; `binding.gyp` reuses
+the supply-chain JSON-then-textual pattern.
+
+**Then the adversarial review round.** 3 hunters + per-finding verifiers, every claim
+reproduced against the live scanner — 19 candidates, **9 confirmed and fixed**, each
+locked with a fixture + CI snippet. The recurring lesson hit again, on hand-written
+regexes that *looked* fine:
+- `HI026` hard-coded one word order (verb→prior-ref→noun) and **missed the most
+  common injection string of all** — "ignore the instructions **above**"
+  (verb→noun→positional). Added a second order-agnostic arm (positional words only,
+  so benign "follow the instructions in the README" stays GREEN).
+- `CR041` fired CRITICAL on a benign Markdown TOC link `[system](#system)` — dropped
+  the self-referential `#system` href, keeping only the mismatched-href forgery
+  (`#assistant`/`#context`), the actual Bing/Sydney attack.
+- `CR042` had **three secret-handling bugs at once**: it missed Stripe `sk_live_`
+  (hyphen-vs-underscore sibling); its AWS `AKIA…` arm was **dead code** (the
+  bare-ENV-echo placeholder branch swallowed every well-formed key first); and an
+  all-`x` `ghp_xxxx…` dummy slipped the `\bxxx+\b` guard to over-fire CRITICAL.
+  Fixed by testing the LIVE-token shape first and gating on the **matched token**
+  being a non-dummy (repeated-fill / EXAMPLE marker) — so a real token co-located
+  with the word "example" still fires, while the AWS doc key is suppressed.
+- `AST010` tested **arg0 for literalness — but `os.spawn*(mode, file, …)` puts the
+  mode there**, force-escalating every literal-program spawn to CRITICAL. Fixed with
+  a signature-aware program-path index (arg1 for `spawn*`, arg0 for `exec*`/
+  `posix_spawn`).
+- `HI029` omitted the canonical `catbox.moe`/`uguu.se` staging hosts.
+- A deeply-nested `binding.gyp` **crashed the whole scan** with an uncaught
+  `RecursionError` (no JSON at all — a DoS/evasion). Two-layer fix: bound the walk
+  depth (root) **and** wrap every structural pass in `main()` so a crash degrades to
+  a `LOW` note instead of aborting the scan (backstop — also covers the two
+  pre-existing sibling walkers).
+
+Seven OOS limitations were recorded (receiver-blind `.extractall` on pandas, aliased
+`from os import execv`, deep-path manifest discovery, the interpreter-socket
+reverse-shell class) and three claims refuted. The lesson, third time running: a
+hand-written regex over a structured surface (word order, token shapes, an arg index)
+spawns sibling forms — reproduce each against the live scanner, fix the root, lock
+the form. And a *crash* is worse than a missed finding: never let one pass abort the
+scan.

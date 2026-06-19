@@ -4,6 +4,49 @@ All notable changes to skill-checker.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.10.0] — 2026-06-19
+
+**Ecosystem hardening** against the 2026 supply-chain + prompt-injection + MCP
+secret-egress wave. A 5-lane web sweep of the agent-skill / MCP / LLM-app security
+ecosystem (MITRE ATT&CK, Vigil-llm, Bandit, Token Security, StepSecurity Phantom
+Gyp, Socket.dev), scoped against our invariants — every gap grep-verified absent
+from `scan.py`. Ten rules across **existing** passes (no new subsystem); each
+completes a surface we had opened one field short.
+
+### Added
+- `CR041` (CRITICAL) — chat-template control tokens forging a system/assistant turn
+  in SKILL.md prose (`<|im_start|>`, `<<SYS>>`, `[INST]`, `[system](#assistant)`,
+  `{{#system}}`); `HI026` (HIGH) — the instruction-override triple gate ("disregard
+  all previous instructions"). Both `PROSE_TARGETING` + clause-aware negation guard.
+  *Source: Vigil-llm YARA, OWASP LLM01.*
+- `AST010` (CRITICAL non-literal / HIGH literal) — `os.exec*`/`os.spawn*`/
+  `posix_spawn` process replacement, completing `AST003` (which modelled only
+  `os.system`/`subprocess`); `AST011` (MEDIUM) — `extractall`/`unpack_archive`
+  without a member filter (Zip-Slip). *Source: Bandit B606/B202.*
+- `CR042` (CRITICAL) — a **live-token** value (`ghp_`/`sk-`/`xox.-`/`AKIA…`/`AIza…`/
+  JWT) in a bundled `mcpServers[].env`/`headers`, with a `${VAR}`/placeholder guard;
+  `HI027` (HIGH) — a credential-file ref or reputation-bad dest there. The
+  `mcpServers` loop previously read only `command`/`args`/`url`. *Source: Token
+  Security (~20% of MCP configs carry hardcoded secrets); the named ROADMAP candidate.*
+- `CR043` (CRITICAL) — gyp `<!(` command-substitution in a bundled `binding.gyp`
+  (Phantom Gyp install-RCE, no package.json script); `HI028` (HIGH) — bare presence
+  of a `binding.gyp` (a skill is never a native addon). *Source: StepSecurity, a
+  live June 2026 worm campaign.*
+- `CR044` (CRITICAL) — `/dev/tcp` reverse shell / `nc -e` inbound C2; `HI029` (HIGH)
+  — anonymous file-staging / paste **download** hosts (`transfer.sh`/`gofile.io`/
+  `bashupload.com`/…), the second-stage source class `CR026` (exfil destinations)
+  missed. *Source: MITRE T1608.001, skillcop, Socket.dev.*
+- `INV001` escalates HIGH→CRITICAL for a bundled file whose magic bytes are an
+  executable (ELF/PE/Mach-O), reusing bytes already read. *Source: GuardDog.*
+- `examples/evil-ecosystem/` (GREEN→RED, all ten rules + INV001-ELF + the
+  `${VAR}`-placeholder discrimination) + `examples/clean-ecosystem/` (defensive
+  prose, argument-list subprocess, `extractall(filter="data")`, no bundled config) →
+  exit 0. CI asserts exit codes + per-form snippet locks. Full sweep additive.
+- `docs/specs/2026-06-19-ecosystem-hardening.md` (incl. the OPT-IN / SKIP / needs-LLM
+  ledger and the **v2.0 = JS/TS pass** reservation); `THREAT_MODEL.md`,
+  `docs/ROADMAP.md`, `README.md`, `references/red-flags.md`,
+  `references/patch-templates.md`, `SKILL.md` updated.
+
 ## [1.9.0] — 2026-06-19
 
 **Borrow-from-SkillSpector** increment. A scoping pass over NVIDIA SkillSpector's 16
