@@ -15,6 +15,7 @@ Checks:
 Internal/quality IDs (IO*, LO*) are exempt from the documentation check.
 """
 
+import ast
 import re
 import sys
 from pathlib import Path
@@ -26,11 +27,44 @@ def _read(rel):
     return (ROOT / rel).read_text(encoding="utf-8", errors="replace")
 
 
+RULE_ID_RE = re.compile(r"^[A-Z]{2,4}\d{3}$")
+
+
 def emitted_rule_ids(scan: str) -> set:
-    """Rule IDs the scanner can emit: every rule-list tuple `("XX###", …` and every
-    structural `rule_id="XX###"`."""
-    ids = set(re.findall(r'\(\s*"([A-Z]{2,4}\d{3})"\s*,', scan))
-    ids |= set(re.findall(r'rule_id\s*=\s*"([A-Z]{2,4}\d{3})"', scan))
+    """Every rule ID the scanner can EMIT, harvested by PARSING scan.py (stdlib `ast`,
+    never executed) and collecting string-literal IDs that sit in an EMISSION position —
+    a rule-list / return Tuple/List element, a Call argument or keyword (`Finding(...)`,
+    `self._add(node, "AST009", …)`, `rule_id="CR032"`), or a Dict key (`"TF001": …`).
+    This is quote-AGNOSTIC and family-AGNOSTIC (a single-quoted literal or a brand-new
+    family is not missed — every form-specific regex went blind to a whole family before:
+    AST/TF round 2, single-quote/new-family round 3), and it ignores comments and
+    docstrings (not in those positions), so a phantom ID in a comment cannot false-fail
+    the gate (Codex round 3)."""
+    try:
+        tree = ast.parse(scan)
+    except SyntaxError:   # permissive fallback if scan.py won't parse
+        return set(re.findall(r"""['"]([A-Z]{2,4}\d{3})['"]""", scan))
+
+    ids = set()
+
+    def take(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                and RULE_ID_RE.match(node.value):
+            ids.add(node.value)
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Tuple, ast.List)):
+            for el in node.elts:
+                take(el)
+        elif isinstance(node, ast.Call):
+            for a in node.args:
+                take(a)
+            for kw in node.keywords:
+                take(kw.value)
+        elif isinstance(node, ast.Dict):
+            for k in node.keys:
+                if k is not None:
+                    take(k)
     return ids
 
 

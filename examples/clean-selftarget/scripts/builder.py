@@ -31,6 +31,28 @@ def dump(p, data):
     p.write_text(data)
 
 
+# A module-level __file__ binding used only to READ our own source for a banner.
+src = Path(__file__)
+VERSION_LINE = src.read_text().splitlines()[0] if src.exists() else ""
+
+
+def export(src, dest_text):
+    # `src` here is a PARAMETER that shadows the module-level `src = Path(__file__)`.
+    # Lexical masking must resolve to the param (a caller-chosen path), NOT the module
+    # binding -> must NOT fire AST009 (Codex round 3 FP: the per-scope set used to leak
+    # the module binding into this same-named param).
+    src.write_text(dest_text)
+
+
+def write_report(report):
+    # rebind a self-path variable to a DERIVED sibling, then write the sibling. Flow-
+    # sensitive last-write-wins must DROP the self-path binding on the rebind, so this
+    # benign report write does NOT fire AST009 (Codex round 3 re-sweep FP).
+    out = Path(__file__)
+    out = out.with_name("report.txt")
+    out.write_text(report)
+
+
 def write_siblings():
     # paths DERIVED from __file__ are DIFFERENT files (report/output/backup), not the
     # running file -> must NOT fire AST009 (the with_name/parent/rename-source guards)

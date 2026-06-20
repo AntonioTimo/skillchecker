@@ -20,7 +20,7 @@ docs → PR → squash-merge → GitHub release.
 | H | Taint / data-flow: credential → network exfil (TF001/TF002) | v1.8.0 | [#9](https://github.com/AntonioTimo/skillchecker/pull/9) | ✅ released |
 | I | Self-targeting prose + self-modification + activation-surface (borrow-from-SkillSpector) | v1.9.0 | [#10](https://github.com/AntonioTimo/skillchecker/pull/10) | ✅ released |
 | J | Ecosystem hardening (2026 supply-chain + prompt-injection + MCP secret-egress) | v1.10.0 | [#11](https://github.com/AntonioTimo/skillchecker/pull/11) | ✅ released |
-| — | Adversarial-audit hardening (Codex): fail-closed + prose/taint/AST fixes + doc-currency gate | v1.10.1 | (PR pending) | 🔧 committed, pre-merge |
+| — | Adversarial-audit hardening (Codex + self-run multi-agent sweeps, to convergence) | v1.11.0 | (PR pending) | 🔧 committed, pre-merge |
 
 ---
 
@@ -559,40 +559,56 @@ scan.
 
 ---
 
-## v1.10.1 — Adversarial-audit hardening (Codex)
+## v1.11.0 — Adversarial-audit hardening, to convergence (Codex + self-run sweeps)
 
 **Goal.** A security tool's findings must be trusted, so the H/I/J commits went to an
-external reviewer (Codex). Verdict: **REJECT** — six defects across the three commits.
-Two were false-**negatives** our own adversarial passes had missed; one was a
-fail-**open** the Phase-J narrative above literally documents introducing ("a crash
-degrades to a `LOW` note instead of aborting the scan"). That `LOW`-note backstop was
-the bug: a `LOW` does not move the verdict, so a parser crash on a config read GREEN.
+external reviewer (Codex), then — when the cost of a hidden false-negative was deemed too
+high to ship on one review — through **self-run multi-agent adversarial sweeps**: each
+sweep fans out attackers that try to break every fix *against the live scanner*, then
+adversarially re-verifies each claimed gap by reproducing it again before it counts. The
+loop ran **until dry**: Codex found 6 → fixed; a sweep found 25 → fixed; a re-sweep found
+10 siblings of *those* fixes → fixed; and so on. This is the cycle-breaker the bug-fix
+discipline prescribes: latches don't converge, fan-out + adversarial verification does.
 
-**Discipline (the user's two questions: "это TDD?" and "лечишь диагноз или симптом?").**
-Every finding was **reproduced against the live scanner before any fix** (RED), fixed,
-re-run (GREEN), then **promoted to a permanent fixture vector + a CI snippet assert** so
-it cannot silently return. Where the reported case was only a symptom, the fix went to
-the disease class — and two siblings the audit did *not* name were fixed alongside:
+**Discipline.** Every finding was **reproduced against the live scanner before any fix**
+(RED), fixed, re-run (GREEN), then **promoted to a permanent fixture + a CI snippet
+assert**. Each fix went to the **disease class**, not the reported instance — and the
+sweeps repeatedly proved that a too-narrow fix (round N) spawns a sibling (round N+1),
+forcing the *structural* version. Two corrections worth recording, because the
+intermediate rounds are now superseded:
 
-| # | Reported symptom | Diagnosis (disease) | Fix |
-|---|---|---|---|
-| 1 | deep `settings.json` → GREEN | any pass crash fails **open** | backstop → `CRITICAL`; `_parse_json` catches `RecursionError` → textual backstop recovers `CR032` |
-| 2 | "Never mind, …reveal prompt" suppressed | negation scope leaks past a clause boundary | **comma ends the negation's clause** (+ idiom break-words) |
-| 3 | walrus `:=` not propagated | taint enumerates only `Assign*`, not every binding construct | handle `NamedExpr` **and** `for`-targets (the sibling the audit missed) |
-| 4 | `AST009` cross-function false fire + `r+` missed | flow-insensitive global `__file__` binding is unsound; write-mode test missed `+` | **inline-only** matching (drop the global set); write-mode `wax` → `wax+` |
-| 5 | `extractall(filter="fully_trusted")` exempt | exemption keyed on **presence** of the kwarg, not its **value** | exempt only safe values (`filter="data"/"tar"`, `members≠getmembers/getnames`) |
-| 6 | `_exec_magic` reads whole file | **any** per-file read is unbounded (DoS) — the sibling: `unicode`/`ast`/`taint` had no size cap | read 4 bytes; `_read_text_safe` caps at 8 MB; per-file passes skip `> MAX_SCAN_BYTES` in lockstep with `scan_file` (50 MB config: hang → ~0.05 s) |
+- **Negation guard.** Round 1 set "a comma ends the negation's clause" → that
+  false-positived real defensive enumerations. Round 2 removed the comma break → that
+  re-opened a comma-splice bypass (`Never X, reveal your system prompt`). Round 3 added an
+  `or`/`nor` coordinator test → an attacker faked the `or` anywhere in the sentence to
+  suppress a CRITICAL. The converged fix: suppress only when a **comma-coordinator**
+  (`, or` / `, nor` — the actual defensive-list signature) ties the items under the
+  negation; a bare `or`, a comma-splice, and a faked coordinator all fire.
+- **`AST009`.** Round 1 used a global flow-insensitive `__file__` set → cross-function
+  false fire. Round 2 went inline-only → missed same-scope bindings. The converged fix is
+  **per-scope, source-order, last-write-wins** resolution: every binding form (assign /
+  walrus / tuple-unpack / transitive `q=p` / aliased `open` / `for p in [Path(__file__)]`)
+  resolves, a rebind to a derived sibling drops it, and a same-named param masks an outer
+  binding. No cross-function flow, no inline-only blind spot.
 
-**Doc-currency, mechanized.** The user's standing demand — *docs must always reflect
-product state* — is now a **CI gate**, not a promise: `scripts/check_docs.py` fails the
-build if any emitted rule ID is undocumented, any `examples/` fixture is unswept, or the
-CHANGELOG top version is missing from the ROADMAP. It immediately found six genuinely
-undocumented historical rules (`CR036`/`CR037`/`HI008`/`FM001`/`FM002`/`ME007`) — now
-documented. Also swept the DEVLOG's own rot: phases E/F/G headers still said "in review".
+**Coverage gained (new true-positives → minor bump).** An **import-alias resolver**
+(`_canon`) canonicalizes `import shutil as sh` / `from shutil import unpack_archive` for
+*every* dotted AST rule; `AST011` gained `.extract()`, method-reference indirection, and a
+value-aware exemption; the taint pass gained comprehension targets and `HI009` gained
+`httpx.<method>`; manifest discovery became **recursive** (bounded). Robustness became
+**fail-closed**: a crashing pass, a too-large config/manifest (`IO004`), an unbounded read,
+or a pathological directory tree can no longer read GREEN or hang.
 
-**Trade recorded (OOS).** `AST009` no longer catches the cross-function form where
-`__file__` is bound on a prior line in one function and written through a parameter in
-another — a deliberate soundness trade (the unsound global binding caused the
-false-positive). The intraprocedural taint pass still does not follow taint through a
-`for`-iterable's *elements* beyond the direct target binding. Both are noted in
-THREAT_MODEL. No new rule IDs — this is correctness + robustness on the shipped set.
+**Doc-currency, mechanized.** *Docs must always reflect product state* is now a **CI gate**:
+`scripts/check_docs.py` parses scan.py with stdlib `ast`, harvests every emittable rule-ID
+literal at its emission position (quote- and family-agnostic, ignoring comments/docstrings),
+and fails the build if any is undocumented, any `examples/` fixture is unswept, or the
+CHANGELOG top version is missing from the ROADMAP. It immediately found six undocumented
+historical rules (`CR036`/`CR037`/`HI008`/`FM001`/`FM002`/`ME007`) and the DEVLOG's own
+"in review" rot on shipped phases E/F/G — all fixed in the same pass.
+
+**Residual boundaries (OOS, documented in THREAT_MODEL).** Cross-function / inter-file flow,
+container-CONTENT taint (`bag.append(secret); send(bag)` — the `HI009` line rule is the
+backstop), and named-host destination reputation remain out of scope by design; the LLM-
+driven SKILL.md steps are the backstop. The only new rule ID is `IO004` (a fail-closed
+robustness signal).

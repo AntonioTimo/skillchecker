@@ -19,7 +19,7 @@ out of scope" item or a spec "Non-goals" line.
 | H | Taint / data-flow: credential → network exfil (`TF001`/`TF002`) | 1.8.0 |
 | I | Self-targeting prose + self-modification + activation-surface (`HI024`/`HI025`/`ME013`/`ME014`/`ME015`/`AST009`) — borrow-from-SkillSpector | 1.9.0 |
 | J | Ecosystem hardening — forged-instruction prose, `os.exec`/Zip-Slip, MCP secret-egress, Phantom Gyp, reverse-shell + staging hosts (`CR041`–`CR044`/`HI026`–`HI029`/`AST010`/`AST011`) | 1.10.0 |
-| — | Adversarial-audit hardening (Codex): fail-closed backstop, comma-clause negation, walrus/`for`-target taint, `AST009` inline-only + `r+`, value-aware `AST011`, unbounded-read DoS cap; `check_docs.py` doc-currency gate | 1.10.1 |
+| — | Adversarial-audit hardening (Codex + self-run multi-agent sweeps, to convergence): fail-closed `IO004`, comma-coordinator negation guard, walrus/`for`/comprehension taint + `HI009` httpx, per-scope-lexical `AST009`, value-aware `AST011` + `.extract`/method-ref + import-alias resolver, recursive manifest discovery, bounded tree walks; AST-based `check_docs.py` doc-currency gate | 1.11.0 |
 
 ## Road to v2.0
 

