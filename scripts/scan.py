@@ -2714,77 +2714,40 @@ class _AstAuditor(ast.NodeVisitor):
         return None
 
     def _path_ctor_at(self, func_node) -> bool:
-        """True if a call's func resolves to the pathlib.Path CONSTRUCTOR as of its position —
-        POSITION-AWARE (a rebind masks). Resolves an alias (`P = pathlib.Path` / `from pathlib
-        import Path as P`) via the per-scope alias timeline (read directly, so it works while
-        _scope_bindings is still computing self.scopes) then the import maps."""
+        """True if a call's func resolves to the pathlib.Path CONSTRUCTOR as of its position — via
+        the unified _func_canon -> _canon (walrus / getattr / alias / shadow / capture all handled
+        there). round-9: no longer reads the old alias timeline / _local_binding_scope."""
         pos = (getattr(func_node, "lineno", 0), getattr(func_node, "col_offset", 0))
-        nm = _dotted_name(func_node)
-        if not nm:
-            # an inline getattr(<base>, "Path")(...) ctor — the base resolves through imports
-            return isinstance(func_node, ast.Call) and self._func_canon(func_node, pos) == "pathlib.Path"
-        head, dot, rest = nm.partition(".")
-        if self._capture_masked(head, pos):
-            return False                        # the ctor name is an except/match capture here
-
-        i = self._local_binding_scope(head, pos)
-        if i is not None:                       # locally bound as of pos (param/for/assign/…)
-            canon = None
-            for bp, cn in self.alias_scopes[i].get(head, ()):
-                if bp <= pos:
-                    canon = cn
-            resolved = (canon + "." + rest if dot else canon) if canon else None
-            return resolved == "pathlib.Path"   # a non-alias local (param/for/AnnAssign) -> masked
-        return self._resolve_import(nm) == "pathlib.Path"   # the import (before any rebind)
+        return self._func_canon(func_node, pos) == "pathlib.Path"
 
     def _canon(self, name, pos=None):
-        """Differential wrapper (round-9): old _canon_impl, and when self._diff is active, log any
-        divergence from the new _facts_at-based _canon_v so the migration can reach parity."""
-        r = self._canon_impl(name, pos)
-        # log only at REAL resolution depth (all scopes incl. fact_scopes pushed) — not during the
-        # build of the old timelines, where fact_scopes for the current scope is not yet pushed.
-        if self._diff is not None and pos is not None and name and len(self.fact_scopes) == len(self.scopes):
-            v = self._canon_v(name, pos)
-            if v != r:
-                self._diff.append(("canon", name, pos, r, v))
-        return r
-
-    def _canon_impl(self, name, pos=None):
-        """Canonicalize a dotted call name to its real `module.X`. When a `pos` (lineno,
-        col_offset) is given, a WITHIN-SCOPE assignment alias is resolved POSITION-AWARELY
-        first: the innermost scope that binds the head decides via its most-recent binding AS
-        OF `pos`, so a rebind masks (`mv=os.replace; mv(__file__); mv=safe` still resolves mv
-        -> os.replace AT the call, and a param `def f(system): system()` resolves to nothing)
-        — round-4 audit flow-sensitivity. Otherwise falls back to the import/star maps and the
-        flow-insensitive global assign map (`a = os; a.replace`) — used only when pos is None."""
+        """Canonicalize a dotted call name to its real `module.X` over the UNIFIED _VF timeline
+        (round-9: the single source replacing the old alias walker). The innermost fact-scope binding
+        the head decides POSITION-AWARELY (capture- and shadow-masked); an outer-scope non-alias — or
+        a pos=None call (no scope context) — falls through to the flow-insensitive global map
+        (assign_aliases / imports), so the cross-scope global-rebind (`global run; run=os.system`)
+        still resolves. A rebind masks; a param/for/AnnAssign masks; a future rebind does not."""
         if not name:
             return name
         head, dot, rest = name.partition(".")
-        if pos is not None and self._capture_masked(head, pos):
-            return None                  # the head is an except/match capture here, not the alias
         if pos is not None:
-            i = self._local_binding_scope(head, pos)
+            if self._capture_masked(head, pos):
+                return None                          # the head is an except/match capture here
+            i, f = None, None
+            for idx in range(len(self.fact_scopes) - 1, -1, -1):
+                r = _resolve_tl(self.fact_scopes[idx].get(head, ()), pos)
+                if r is not None:
+                    i, f = idx, r
+                    break
             if i is None:
-                # NOT locally bound as of pos -> it is the module import (a later rebind must
-                # not retroactively mask an earlier import-use — round-4 audit pass 5). Resolve
-                # via the IMPORT maps, NOT the flow-insensitive global assign map.
-                return self._resolve_import(name)
-            local = None
-            for bp, cn in self.alias_scopes[i].get(head, ()):
-                if bp <= pos:
-                    local = cn
-            if local:
-                return local + ("." + rest if dot else "")
-            if i == len(self.scopes) - 1:
-                # INNERMOST scope binds head to a non-alias (param / local var / for-target /
-                # AnnAssign) -> a definite shadow. Return None, NOT the name: the unchanged
-                # dotted string `shutil.unpack_archive` would still match the rule (round-4
-                # audit pass 3). None matches no rule.
-                return None
-            # bound only in an OUTER scope to a non-alias (a module placeholder `run=None` later
-            # reassigned via `global run; run=os.system`) -> fall through to the global map.
+                return self._resolve_import(name)    # not locally bound -> import maps (not global)
+            if f.canon:
+                return f.canon + ("." + rest if dot else "")
+            if i == len(self.fact_scopes) - 1:
+                return None                          # innermost non-alias shadow -> masks
+            # outer-scope non-alias (a module placeholder later reassigned via `global`) -> global map
         if name in self.assign_aliases:
-            return self.assign_aliases[name]   # `mv = os.replace` / `PP = pathlib.Path` (pos=None)
+            return self.assign_aliases[name]
         if self._shadowed(head):
             return name
         if name in self.import_from:
@@ -2792,16 +2755,15 @@ class _AstAuditor(ast.NodeVisitor):
         if dot and head in self.import_modules:
             return self.import_modules[head] + "." + rest
         if dot and head in self.assign_aliases:
-            return self.assign_aliases[head] + "." + rest   # `a = os; a.replace`
-        return self._resolve_import(name)                    # star-import resolution
+            return self.assign_aliases[head] + "." + rest
+        return self._resolve_import(name)
 
     def _shadowed(self, head) -> bool:
         """True if `head` is bound by a LOCAL param/assignment in an active scope (so a
         module-level import/star of the same name is masked) — but NOT if it is an explicit
-        callable/module alias (those resolve). The position-aware path above subsumes this
-        for `pos`-aware calls; this remains for the pos=None fallback."""
+        callable/module alias (those resolve). Used by _canon's outer-scope global fallback."""
         return bool(head) and head not in self.assign_aliases \
-            and any(head in binds for binds in self.scopes)
+            and any(head in binds for binds in self.fact_scopes)
 
     def _func_canon(self, func, pos):
         """Canonical dotted name of a call's func, POSITION-AWARE — the single entry point so
@@ -2844,8 +2806,8 @@ class _AstAuditor(ast.NodeVisitor):
             return False
         for mp, rp in regions:
             if mp <= pos < rp:
-                tl = self.alias_scopes[-1].get(name, ()) if self.alias_scopes else ()
-                if not any(mp < bp <= pos for bp, _c in tl):   # no in-body rebind supersedes it yet
+                tl = self.fact_scopes[-1].get(name, ()) if self.fact_scopes else ()
+                if not any(mp < bp <= pos for bp, _vf, _c in tl):  # no in-body rebind supersedes it yet
                     return True
         return False
 
@@ -3408,34 +3370,11 @@ class _AstAuditor(ast.NodeVisitor):
         return refs
 
     def _method_ref_at(self, name_node):
-        """Differential wrapper (round-9): old impl + log divergence vs the _facts_at reader."""
-        r = self._method_ref_at_impl(name_node)
-        if self._diff is not None and len(self.fact_scopes) == len(self.scopes):
-            pos = (getattr(name_node, "lineno", 0), getattr(name_node, "col_offset", 0))
-            f = self._facts_at(name_node.id, pos)
-            v = (f.mleaf, f.mrecv) if (f is not None and f.mleaf is not None) else None
-            if v != r:
-                self._diff.append(("mref", name_node.id, pos, r, v))
-        return r
-
-    def _method_ref_at_impl(self, name_node):
-        """(leaf, receiver_is_archive) for a Name that holds a method reference AS OF its
-        position (a later rebind to a non-ref does not leak back), or None."""
+        """(leaf, receiver_is_archive) for a Name holding a method reference AS OF its position over
+        the unified _VF timeline (capture-masked, cross-scope), or None. round-9."""
         pos = (getattr(name_node, "lineno", 0), getattr(name_node, "col_offset", 0))
-        if self._capture_masked(name_node.id, pos):
-            return None                         # the name is an except/match capture here, not a ref
-        # the innermost scope that BINDS the name decides (a param / for / AnnAssign masks an
-        # outer archive method-ref — round-4 audit pass 5 FP); resolve its ref timeline as of pos.
-        i = self._local_binding_scope(name_node.id, pos)
-        if i is not None:
-            tl = self.method_scopes[i].get(name_node.id)
-            if tl:
-                leaf, recv = None, False
-                for bp, lf, rc in tl:
-                    if bp <= pos:
-                        leaf, recv = lf, rc
-                return (leaf, recv) if leaf is not None else None
-        return None
+        f = self._facts_at(name_node.id, pos)
+        return (f.mleaf, f.mrecv) if (f is not None and f.mleaf is not None) else None
 
     def _func_attr(self, func):
         """The method leaf a call invokes: a direct `obj.attr`, an inline walrus
@@ -3480,28 +3419,14 @@ class _AstAuditor(ast.NodeVisitor):
         return "other"
 
     def _name_archive_state(self, name_node):
-        """Differential wrapper (round-9): old impl + log divergence vs the _facts_at reader."""
-        r = self._name_archive_state_impl(name_node)
-        if self._diff is not None and len(self.fact_scopes) == len(self.scopes):
-            pos = (getattr(name_node, "lineno", 0), getattr(name_node, "col_offset", 0))
-            f = self._facts_at(name_node.id, pos)
-            v = "arch" if (f and f.archive) else ("seqarch" if (f and f.seq is not None and f.seq.archive) else "other")
-            if v != r:
-                self._diff.append(("arch", name_node.id, pos, r, v))
-        return r
-
-    def _name_archive_state_impl(self, name_node):
-        """The 'arch'/'seqarch'/'other' state of a Name as of its position — the innermost
-        scope that binds it decides (param shadow), resolving AS OF the use position."""
+        """The 'arch'/'seqarch'/'other' state of a Name as of its position over the unified _VF
+        timeline (cond-aware archive via _resolve_tl, capture-masked, cross-scope). round-9."""
         pos = (getattr(name_node, "lineno", 0), getattr(name_node, "col_offset", 0))
-        if self._capture_masked(name_node.id, pos):
-            return "other"                      # the name is an except/match capture here, not an archive
-        for i in range(len(self.scopes) - 1, -1, -1):
-            if name_node.id in self.scopes[i]:
-                return self._archive_state(self.archive_scopes[i].get(name_node.id, ()), pos)
-        for binds in reversed(self.archive_scopes):          # closure: not locally bound
-            if name_node.id in binds:
-                return self._archive_state(binds[name_node.id], pos)
+        f = self._facts_at(name_node.id, pos)
+        if f and f.archive:
+            return "arch"
+        if f and f.seq is not None and f.seq.archive:
+            return "seqarch"
         return "other"
 
     def _is_archive_expr(self, node) -> bool:
@@ -3648,71 +3573,32 @@ class _AstAuditor(ast.NodeVisitor):
         return binds
 
     def _self_target(self, node) -> bool:
-        """Differential wrapper (round-9): old _self_target_impl + log divergence vs the new
-        _facts_at-based reader, when the diff is active at real resolution depth."""
-        r = self._self_target_impl(node)
-        if self._diff is not None and isinstance(node, ast.Name) \
-                and not _is_own_file_target(node, self._path_ctor_at) \
-                and len(self.fact_scopes) == len(self.scopes):
-            f = self._facts_at(node.id, (getattr(node, "lineno", 0), getattr(node, "col_offset", 0)))
-            v = bool(f and f.self_file)
-            if v != r:
-                self._diff.append(("self", node.id, (node.lineno, node.col_offset), r, v))
-        return r
-
-    def _self_target_impl(self, node) -> bool:
-        """The skill's own running file: inline `__file__`/`Path(__file__)` (walrus
-        unwrapped), OR a Name resolving to it. Resolution is per-scope and POSITION-AWARE:
-        the innermost scope that binds the name decides via its most-recent binding AS OF
-        this node's line (so a write fires only while the name IS __file__, and a param or
-        a rebind to a non-file value masks an outer __file__ binding)."""
+        """The skill's own running file: inline `__file__`/`Path(__file__)` (walrus unwrapped), OR a
+        Name resolving to it over the unified _VF timeline (capture-masked, cross-scope). round-9."""
         if _is_own_file_target(node, self._path_ctor_at):
             return True
         if isinstance(node, ast.Name):
             pos = (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
-            if self._capture_masked(node.id, pos):
-                return False                    # the name is an except/match capture here, not __file__
-            for binds in reversed(self.scopes):
-                if node.id in binds:
-                    st = None
-                    for bp, k in binds[node.id]:
-                        if bp <= pos:
-                            st = k
-                    return st == "file"       # 'other'/'seqfile'/use-before-bind -> masked
+            f = self._facts_at(node.id, pos)
+            return bool(f and f.self_file)
         return False
 
     def visit_Module(self, node):
-        # capture_scopes FIRST (depends only on the AST): _scope_alias_bindings reads it (via the
-        # local head_is_capture) during construction. Then alias_scopes (read by _path_ctor_at /
-        # _canon), then scopes/archive/method.
+        # round-9: ONE source. capture_scopes (the except/match overlay) first — _scope_facts reads
+        # it (via local_at) during construction — then the unified _VF timeline. The four old per-
+        # scope walkers are gone; every resolver reads fact_scopes.
         self.capture_scopes.append(self._scope_captures(node))
-        self.alias_scopes.append(self._scope_alias_bindings(node))
-        self.scopes.append(self._scope_bindings(node, is_path_ctor=self._path_ctor_at, is_captured=self._capture_masked))
-        self.archive_scopes.append(self._scope_archive_names(node))
-        self.method_scopes.append(self._scope_method_refs(node))
-        self.fact_scopes.append(self._scope_facts(node))         # round-9: parallel unified timeline
+        self.fact_scopes.append(self._scope_facts(node))
         self.generic_visit(node)
-        self.alias_scopes.pop()
         self.capture_scopes.pop()
-        self.scopes.pop()
-        self.archive_scopes.pop()
-        self.method_scopes.pop()
         self.fact_scopes.pop()
 
     def visit_FunctionDef(self, node):
         params = [a.arg for a in self._arg_names(node)]
-        self.capture_scopes.append(self._scope_captures(node))   # before alias: builders read it
-        self.alias_scopes.append(self._scope_alias_bindings(node, params))
-        self.scopes.append(self._scope_bindings(node, params, self._path_ctor_at, self._capture_masked))
-        self.archive_scopes.append(self._scope_archive_names(node))
-        self.method_scopes.append(self._scope_method_refs(node))
-        self.fact_scopes.append(self._scope_facts(node, params))  # round-9: parallel unified timeline
+        self.capture_scopes.append(self._scope_captures(node))
+        self.fact_scopes.append(self._scope_facts(node, params))
         self.generic_visit(node)
-        self.alias_scopes.pop()
         self.capture_scopes.pop()
-        self.scopes.pop()
-        self.archive_scopes.pop()
-        self.method_scopes.pop()
         self.fact_scopes.pop()
 
     visit_AsyncFunctionDef = visit_FunctionDef
