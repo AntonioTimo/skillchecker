@@ -244,3 +244,35 @@ def unpack_capture_rebind_transitive(path):
         ar = tarfile.open(path)
         bb = ar
         bb.extractall("/srv/victim18")
+
+
+def unpack_nested_walrus(path):
+    # NESTED walrus receiver — `(a := (b := tarfile.open(path))).extractall(...)`. The provenance gate
+    # now unwraps NamedExpr recursively (round-10: it unwrapped once) -> AST011.
+    (a := (b := tarfile.open(path))).extractall("/srv/victim19")
+
+
+def unpack_triple_walrus(path):
+    # depth-3 walrus chain — still a provable archive after recursive unwrap (round-10) -> AST011.
+    (a := (b := (c := tarfile.open(path)))).extractall("/srv/victim20")
+
+
+def unpack_nested_walrus_methodref(path):
+    # method-ref bound through a nested walrus, then called — `(a := (b := t.extractall))(...)` on a
+    # provable archive receiver (round-10 recursive-unwrap in _extractall_on_archive) -> AST011.
+    t = tarfile.open(path)
+    (a := (b := t.extractall))("/srv/victim21")
+
+
+def unpack_inline_list_subscript(path):
+    # INLINE literal-list subscript `[tarfile.open(path)][0].extractall(...)` — a seq-of-archives
+    # literal indexed directly (round-10: the Subscript arm handled only a Name receiver) -> AST011.
+    [tarfile.open(path)][0].extractall("/srv/victim22")
+
+
+def unpack_scalar_then_seq(path):
+    # a name first a SCALAR archive, then UNCONDITIONALLY rebound to a sequence-of-archives, indexed
+    # extractall — the seq rebind now supersedes the scalar (round-10 archive-precedence) -> AST011.
+    z = tarfile.open(path)
+    z = [tarfile.open(path)]
+    z[0].extractall("/srv/victim23")

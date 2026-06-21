@@ -89,6 +89,34 @@ backstop). Still no new rule IDs.
   alias), so the per-scope reset is authoritative everywhere; the genuine cross-scope global-rebind
   (`x=None; … global x; x=os.system; x(c)`) and `def`-then-`x=os.system` still fire.
 
+### Refactor — round-9: unified ValueFacts evaluator (single binding/resolution source)
+
+The four per-scope timeline walkers (callable-alias / `__file__` / archive / method-ref) that the
+H1–H7 sibling-bug cycle kept re-diverging were collapsed into ONE abstract interpreter over a single
+value-facts type (`_VF`): one `eval_expr` / `bind_target` builds `{name: [(pos, _VF, cond)]}`, and
+every resolver (`_canon` / `_self_target` / `_name_archive_state` / `_method_ref_at`) reads it. Done
+incrementally (build parallel → differential against the old resolvers → switch domain-by-domain →
+delete the old walkers), each step a commit gated by a golden-output baseline (`scripts/diff_baseline.py`).
+The unified evaluator reached **zero differential divergence** across the whole corpus and the cutover is
+byte-identical to the golden baseline — empirical equivalence on the (finite) corpus, not a formal proof.
+Net ≈ −560 lines. A new binding-form × provenance × shadow/rebind/transitive/capture/walrus/cond
+combination is now handled in ONE place, so the H1–H7 family is constructively unreachable. No rule IDs.
+
+### Fixed — round-10: form-coverage hardening (pre-existing FNs surfaced by the round-9 sweep)
+
+An adversarial sweep against the unified evaluator (162 constructions → 16 confirmed defects) was each
+reproduced against BOTH the old (pre-cutover) and new scanner: **all 16 produced identical verdicts — zero
+round-9 regressions; all pre-existing** (in the old code too, just never in the corpus). Ten finite-form
+classes were then fixed in the one evaluator (golden no-drift at each): recursive (not one-shot) NamedExpr
+unwrap in the archive provenance gate (`(a:=(b:=tarfile.open())).extractall()`); inline IfExp and
+literal-sequence subscript as a CALLEE (`(os.system if c else os.popen)(cmd)`, `(os.system,)[0](cmd)`);
+IfExp facts OR-combined across arms (a name bound to a ternary of two callables); inline IfExp self-file
+argument (`open((__file__ if c else __file__), 'w')`); and an archive-precedence fix so a scalar→sequence-
+of-archives rebind supersedes the scalar (`a=tarfile.open(); a=[tarfile.open()]; a[0].extractall()` fires,
+`a.extractall()` on the list stays GREEN). Four remain an **OOS value-flow / interprocedural boundary**
+(documented): a closure free-variable resolved at call time (across three domains), and a `global`-rebind
+visible at a module-level call after a nested mutation. No new rule IDs.
+
 ### Fixed — round-8: except/match capture masking (overlay) + import-as + walrus-call-target
 
 A fresh multi-agent adversarial sweep (**119 constructions, 19 confirmed false-NEGATIVEs**)

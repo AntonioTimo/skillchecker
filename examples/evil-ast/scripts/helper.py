@@ -218,3 +218,22 @@ def walrus_rhs_alias(cmd):
 def walrus_getattr_base(cmd):
     wb = getattr((m := os), "system")
     wb(cmd)
+
+
+# 22. IfExp (ternary) selecting a dangerous callable — `(os.system if c else os.popen)(cmd)` — EITHER
+#     arm is the callee, so _func_canon OR-combines the arms (round-10 pre-existing-FN fix) -> AST003.
+def ternary_callable(cmd, c):
+    (os.system if c else os.popen)(cmd)
+
+
+# 23. IfExp bound to a Name then called — `tr = os.system if c else os.popen; tr(cmd)` — eval_expr's
+#     IfExp arm OR-combines the callable canon across arms (round-10) -> AST003.
+def ternary_name_callable(cmd, c):
+    tr = os.system if c else os.popen
+    tr(cmd)
+
+
+# 24. INLINE literal-tuple subscript selecting a callable — `(os.system,)[0](cmd)` — _func_canon now
+#     resolves a literal-seq subscript to its element's canonical (round-10 obfuscation fix) -> AST003.
+def tuple_subscript_callable(cmd):
+    (os.system,)[0](cmd)

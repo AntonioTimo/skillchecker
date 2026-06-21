@@ -200,10 +200,14 @@ canonicalization) is thus closed and fixture-guarded; what remains open is the *
 (`for f in [benign, os.system]` binds
 the loop var to the first module-qualified element, so a dangerous element after a dangerous-looking
 benign one can be missed), **cross-scope `nonlocal`** writes propagated up to an enclosing scope,
-**return-value modeling** (`importlib.import_module("os").system`, `functools.partial(os.system)`), and
+**return-value modeling** (`importlib.import_module("os").system`, `functools.partial(os.system)`),
 two **capture-mask edges** (a use INSIDE an `except`/`case` block AFTER an in-body reassignment of the
 captured name to a dangerous value but BEFORE leaving the block — contrived, no evasion incentive since
-a direct call fires; and cross-scope closure capture of an outer block's name) —
+a direct call fires; and cross-scope closure capture of an outer block's name), a **CLOSURE free
+variable** read inside a nested function (its value at CALL time is interprocedural — no single textual
+position resolves `def inner(): run(); inner(); run=os.system` (fire), `from os import popen; def f():
+popen(); popen=print` (fire), and `op=os.system; def op(): …; def f(): op()` (GREEN) at once), and a
+`global`-rebind made in a called function and observed at a MODULE-level call —
 all value-flow / interprocedural, the same boundary as conditional-control-flow masking
 (`if False: system=safe; system(cmd)` reads GREEN by latest-binding; the symmetric dangerous
 `if c: runner=os.system; runner(cmd)` correctly fires) and mid-file re-import; `os.startfile` is

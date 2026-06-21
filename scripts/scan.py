@@ -2370,24 +2370,33 @@ def _resolve_tl(tl, pos):
             last = vf
     if last is None:
         return None
+    def kind(vf):
+        if vf.archive:
+            return "arch"
+        if vf.seq is not None and vf.seq.archive:
+            return "seqarch"
+        return "other"
     last_arch = last_seq = None
     for bp, vf, _c in tl:
         if bp <= pos:
-            if vf.archive:
+            k = kind(vf)
+            if k == "arch":
                 last_arch = bp
-            elif vf.seq is not None and vf.seq.archive:
+            elif k == "seqarch":
                 last_seq = bp
 
-    def live(last_bp):
+    def live(last_bp, target):
         if last_bp is None:
             return False
         for bp, vf, cond in tl:
-            other = (not vf.archive) and not (vf.seq is not None and vf.seq.archive)
-            if other and not cond and last_bp < bp <= pos:
+            # an UNCONDITIONAL rebind to a DIFFERENT archive-kind masks (scalar archive <-> sequence
+            # of archives <-> non-archive); a sibling try/except/if-branch rebind (cond) does not
+            # (round-4 audit pass 3 #4 + round-10: a scalar->seq rebind must supersede the scalar).
+            if not cond and last_bp < bp <= pos and kind(vf) != target:
                 return False
         return True
-    arch = live(last_arch)
-    seqarch = (not arch) and live(last_seq)
+    arch = live(last_arch, "arch")
+    seqarch = (not arch) and live(last_seq, "seqarch")
     seq = _VF(archive=True) if seqarch else (last.seq if (last.seq is not None and not last.seq.archive) else None)
     return _VF(canon=last.canon, self_file=last.self_file, archive=arch,
                mleaf=last.mleaf, mrecv=last.mrecv, seq=seq)
@@ -2493,6 +2502,9 @@ def _is_own_file_target(node, is_path_ctor=None) -> bool:
     NE = getattr(ast, "NamedExpr", None)
     if NE is not None and isinstance(node, NE):
         return _is_own_file_target(node.value, is_path_ctor)
+    if isinstance(node, ast.IfExp):                # `(__file__ if c else __file__)` — EITHER arm is
+        return _is_own_file_target(node.body, is_path_ctor) \
+            or _is_own_file_target(node.orelse, is_path_ctor)   # the running file (round-10)
     if isinstance(node, ast.Name):
         return node.id == "__file__"
     if isinstance(node, ast.Call):
@@ -2749,6 +2761,19 @@ class _AstAuditor(ast.NodeVisitor):
         if NE is not None and isinstance(func, NE):
             return self._func_canon(func.value, pos)   # `(run := os.system)(...)` — the walrus VALUE
                                                        # is the callee (round-8 audit sibling-form E).
+        if isinstance(func, ast.IfExp):                # `(a if c else b)(...)` — either arm is the
+            return self._func_canon(func.body, pos) or self._func_canon(func.orelse, pos)  # callee (round-10)
+        if isinstance(func, ast.Subscript):            # `[os.system][0](...)` / `(os.system,)[0](...)` —
+            v = func.value                             # a literal-seq subscript selects a callee (round-10)
+            if isinstance(v, (ast.List, ast.Tuple, ast.Set)):
+                for e in v.elts:
+                    c = self._func_canon(e, pos)
+                    if c and "." in c:                 # prefer a module-qualified (dangerous) canonical
+                        return c
+                return None
+            if isinstance(v, ast.Name):                # a Name bound to a sequence (`seq=[os.system]; seq[0]()`)
+                f = self._facts_at(v.id, pos)
+                return f.seq.canon if (f and f.seq is not None) else None
         dn = _dotted_name(func)
         if dn:
             return self._canon(dn, pos)
@@ -2879,8 +2904,11 @@ class _AstAuditor(ast.NodeVisitor):
                 return v.seq if v.seq is not None else _VF()
             if isinstance(node, ast.IfExp):
                 a, b = eval_expr(node.body, pos), eval_expr(node.orelse, pos)
+                # OR-combine across arms (round-10): EITHER dangerous arm makes the result dangerous —
+                # so a name bound to `os.system if c else os.popen` resolves to a dangerous callable.
                 return _VF(self_file=a.self_file or b.self_file, archive=a.archive or b.archive,
-                           canon=a.canon if a.canon == b.canon else None)
+                           canon=a.canon or b.canon, mleaf=a.mleaf or b.mleaf, mrecv=a.mrecv or b.mrecv,
+                           seq=a.seq or b.seq)
             return _VF()
 
         def bind_target(target, value, pos, cond):
@@ -2987,15 +3015,18 @@ class _AstAuditor(ast.NodeVisitor):
         of a sequence-of-archives (`archives[0]`). A pandas `.str` accessor, a bs4 object, an
         opaque param is NOT provable, so its `.extractall()` does not fire AST011."""
         NE = getattr(ast, "NamedExpr", None)
-        if NE is not None and isinstance(node, NE):
+        while NE is not None and isinstance(node, NE):       # NESTED walrus (round-10): unwrap fully
             node = node.value
         if isinstance(node, ast.Call):
             return self._func_canon(node.func,
                                (getattr(node.func, "lineno", 0), getattr(node.func, "col_offset", 0))) in _ARCHIVE_OPENERS
         if isinstance(node, ast.IfExp):
             return self._is_archive_expr(node.body) or self._is_archive_expr(node.orelse)
-        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
-            return self._name_archive_state(node.value) == "seqarch"   # archives[0].extractall()
+        if isinstance(node, ast.Subscript):
+            if isinstance(node.value, ast.Name):
+                return self._name_archive_state(node.value) == "seqarch"   # archives[0].extractall()
+            if isinstance(node.value, (ast.List, ast.Tuple)):  # INLINE [opener][0] / (opener,)[0] (round-10)
+                return any(self._is_archive_expr(e) for e in node.value.elts)
         if isinstance(node, ast.Name):
             return self._name_archive_state(node) == "arch"
         return False
@@ -3005,7 +3036,7 @@ class _AstAuditor(ast.NodeVisitor):
         `archive.extractall()` (incl. inline walrus) OR a method-ref `ex = archive.extractall;
         ex()` whose receiver was an archive. Gap-5 provenance gate for AST011."""
         NE = getattr(ast, "NamedExpr", None)
-        if NE is not None and isinstance(func, NE):
+        while NE is not None and isinstance(func, NE):       # NESTED walrus (round-10)
             func = func.value
         if isinstance(func, ast.Attribute):
             return self._is_archive_expr(func.value)

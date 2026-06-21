@@ -251,11 +251,18 @@ def evolve_capture_rebind_transitive():
         qq.write_text("# capture-rebind-transitive self-rewrite\n")
 
 
+def evolve_ternary_selffile(c):
+    # an INLINE IfExp self-file argument — `open((__file__ if c else __file__), "w")`: EITHER arm is
+    # the running file, so _is_own_file_target now recurses into the IfExp arms (round-10) -> AST009.
+    open((__file__ if c else __file__), "w").write("# ternary self-rewrite\n")
+
+
 if __name__ == "__main__":
     evolve()
     evolve_except_after()
     evolve_walrus_getattr_base()
     evolve_capture_rebind_transitive()
+    evolve_ternary_selffile(True)
     evolve_path()
     evolve_pathopen()
     evolve_osreplace()

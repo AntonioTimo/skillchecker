@@ -174,7 +174,11 @@ jobs:
                            ("nwf(cmd)", "NESTED walrus head (h:=(g:=getattr)) recursively unwrapped [R8 re-sweep H3]"),
                            ("mab(cmd)", "getattr base is a bare module alias (import os as omod) [R8 re-sweep]"),
                            ("wr(cmd)", "walrus RHS alias (wr = (x:=os.system)) — _dotted_name unwraps NamedExpr [R8 re-sweep]"),
-                           ("wb(cmd)", "walrus getattr base (getattr((m:=os),'system')) [R8 re-sweep]")]:
+                           ("wb(cmd)", "walrus getattr base (getattr((m:=os),'system')) [R8 re-sweep]"),
+                           # round-10 — pre-existing FN classes the round-9 sweep surfaced (IfExp / subscript callee):
+                           ("(os.system if c else os.popen)(cmd)", "INLINE IfExp callee, either arm dangerous [R10]"),
+                           ("tr(cmd)", "Name bound to an IfExp of two callables (tr=os.system if c else os.popen) [R10]"),
+                           ("(os.system,)[0](cmd)", "INLINE literal-tuple subscript callee [R10]")]:
               if sub not in ast003:
                   missing.append(("AST003", sub + " — " + why))
           if missing:
@@ -671,6 +675,7 @@ jobs:
               ("AST009", 'open(p, "w")'),             # `p=__file__; except E as p: pass; open(p,"w")` post-block use fires [R8 F1 no-FN]
               ("AST009", "m := pathlib"),             # getattr((m:=pathlib),"Path")(__file__) — walrus base, _dotted_name unwrap [R8 re-sweep]
               ("AST009", "capture-rebind-transitive"),  # except as ph; ph=Path(__file__); qq=ph; qq.write_text — superseding rebind propagates [R8 re-sweep H7]
+              ("AST009", "(__file__ if c else __file__)"),  # INLINE IfExp self-file arg, either arm is the running file [R10]
           ]
           for r, sub in locks:
               if sub not in snip(r):
@@ -774,6 +779,12 @@ jobs:
               ("AST011", "/srv/victim16"),                # archive provenance survives an except handler (overlay) [R8 F1 no-FN]
               ("AST011", "/srv/victim17"),                # method-ref via WALRUS-bound getattr: ex=(g:=getattr)(t,"extractall") [R8 re-sweep]
               ("AST011", "/srv/victim18"),                # capture→archive rebind→transitive bb=ar; bb.extractall — superseding rebind [R8 re-sweep H7]
+              # round-10 — pre-existing FN classes the round-9 sweep surfaced (inline walrus/subscript/precedence):
+              ("AST011", "/srv/victim19"),                # NESTED walrus receiver (a:=(b:=tarfile.open)).extractall [R10]
+              ("AST011", "/srv/victim20"),                # depth-3 walrus chain [R10]
+              ("AST011", "/srv/victim21"),                # method-ref through a nested walrus (a:=(b:=t.extractall))() [R10]
+              ("AST011", "/srv/victim22"),                # INLINE literal-list subscript [tarfile.open()][0].extractall [R10]
+              ("AST011", "/srv/victim23"),                # scalar archive then UNCONDITIONAL rebind to seq-of-archives, indexed [R10]
               ("HI026", "disregard all previous instructions"),
               ("AST010", "os.execv"),                     # process replacement
               ("AST011", "extractall"),                   # Zip-Slip

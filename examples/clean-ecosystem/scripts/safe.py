@@ -165,3 +165,12 @@ def archive_transitive_capture(p):
     except Exception as archive:
         b = archive
         b.extractall("/dest")
+
+
+def scalar_then_seq_direct(p):
+    # `z` is a SCALAR archive, then UNCONDITIONALLY rebound to a LIST of archives, then a DIRECT
+    # `z.extractall()` — at the sink `z` is a Python list (list has no .extractall), so it is NOT a
+    # provable archive -> no AST011 (round-10: a seq rebind supersedes the prior scalar archive).
+    z = tarfile.open(p)
+    z = [tarfile.open(p)]
+    z.extractall("/dest")
