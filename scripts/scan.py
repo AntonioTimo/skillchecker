@@ -2909,10 +2909,16 @@ class _AstAuditor(ast.NodeVisitor):
                 mrecv=any(e.mrecv for e in els),
             )
 
+        def is_path_ctor(func_node):
+            # SELF-CONTAINED pathlib.Path-ctor check (via eval_expr, not the old _path_ctor_at /
+            # alias timeline) — so _scope_facts has no dependency on the four old walkers.
+            fp = (getattr(func_node, "lineno", 0), getattr(func_node, "col_offset", 0))
+            return eval_expr(func_node, fp).canon == "pathlib.Path"
+
         def eval_expr(node, pos):
             if NE is not None and isinstance(node, NE):
                 return eval_expr(node.value, pos)
-            if _is_own_file_target(node, self._path_ctor_at):
+            if _is_own_file_target(node, is_path_ctor):
                 return _VF(self_file=True)
             if isinstance(node, ast.Name):
                 f = local_at(node.id, pos)
@@ -2922,7 +2928,7 @@ class _AstAuditor(ast.NodeVisitor):
                 canon = (base.canon + "." + node.attr) if base.canon else None
                 return _VF(canon=canon, mleaf=node.attr, mrecv=base.archive)
             if isinstance(node, ast.Call):
-                if self._func_canon(node.func, pos) in _ARCHIVE_OPENERS:
+                if eval_expr(node.func, pos).canon in _ARCHIVE_OPENERS:
                     return _VF(archive=True)
                 ga = is_getattr_call(node, pos)
                 if ga:
