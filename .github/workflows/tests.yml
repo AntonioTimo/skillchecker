@@ -178,15 +178,26 @@ jobs:
                            # round-10 — pre-existing FN classes the round-9 sweep surfaced (IfExp / subscript callee):
                            ("(os.system if c else os.popen)(cmd)", "INLINE IfExp callee, either arm dangerous [R10]"),
                            ("tr(cmd)", "Name bound to an IfExp of two callables (tr=os.system if c else os.popen) [R10]"),
-                           ("(os.system,)[0](cmd)", "INLINE literal-tuple subscript callee [R10]")]:
+                           ("(os.system,)[0](cmd)", "INLINE literal-tuple subscript callee [R10]"),
+                           # set-model (Codex reject of the `a or b` collapse): a callee denotes a SET; a
+                           # benign member can not hide a dangerous one and a const index is honored.
+                           ("(math.sin if c else os.system)(cmd)", "BENIGN arm FIRST cannot hide the dangerous member [Codex F1]"),
+                           ("g(cmd)", "bound IfExp, benign arm first (g = math.sin if c else os.system) [Codex F1]"),
+                           ("(math.sin, os.system)[1](cmd)", "literal-seq subscript HONORS the constant index [Codex F2]"),
+                           ("s[1](cmd)", "Name-bound seq const index selects the dangerous element [Codex F2]")]:
               if sub not in ast003:
                   missing.append(("AST003", sub + " — " + why))
+          # CROSS-RULE union — `(os.system if c else pickle.loads)(x)` fires BOTH AST003 and AST004
+          # (commutative set — arm order is immaterial), proving the union enumerates ALL members.
+          ast004 = "\n".join(f["snippet"] for f in data["findings"] if f["rule_id"] == "AST004")
+          if "(os.system if c else pickle.loads)(x)" not in ast004:
+              missing.append(("AST004", "cross-rule union fires every member's rule [set-model commutativity]"))
           if missing:
               print("::error::evil-ast missing expected catches:")
               for rule, why in missing:
                   print(f"  - {rule} ({why})")
               sys.exit(1)
-          print("evil-ast: exit 3 (RED), AST001+AST002+AST003 (+star-import) present ✓")
+          print("evil-ast: exit 3 (RED), AST001+AST002+AST003+AST004 (+star-import) present ✓")
           PY
 
       - name: clean-ast must exit 0 (GREEN)
@@ -676,6 +687,10 @@ jobs:
               ("AST009", "m := pathlib"),             # getattr((m:=pathlib),"Path")(__file__) — walrus base, _dotted_name unwrap [R8 re-sweep]
               ("AST009", "capture-rebind-transitive"),  # except as ph; ph=Path(__file__); qq=ph; qq.write_text — superseding rebind propagates [R8 re-sweep H7]
               ("AST009", "(__file__ if c else __file__)"),  # INLINE IfExp self-file arg, either arm is the running file [R10]
+              # set-model (Codex reject): the self-mod callee is a UNION; a benign arm cannot hide the
+              # dangerous open / Path ctor (members-aware self-file resolution).
+              ("AST009", '(math.sin if c else open)(__file__, "w")'),     # builtin open hidden in a union arm [set-model]
+              ("AST009", "(math.cos if c else pathlib.Path)(__file__)"),  # Path ctor hidden in a union arm [set-model]
           ]
           for r, sub in locks:
               if sub not in snip(r):
@@ -785,6 +800,8 @@ jobs:
               ("AST011", "/srv/victim21"),                # method-ref through a nested walrus (a:=(b:=t.extractall))() [R10]
               ("AST011", "/srv/victim22"),                # INLINE literal-list subscript [tarfile.open()][0].extractall [R10]
               ("AST011", "/srv/victim23"),                # scalar archive then UNCONDITIONAL rebind to seq-of-archives, indexed [R10]
+              ("AST011", "/srv/victim24"),                # archive .extractall hidden in an IfExp arm — members-aware AST011 [set-model]
+              ("AST011", "/srv/victim25"),                # archive .extractall selected by a literal-seq subscript [set-model]
               ("HI026", "disregard all previous instructions"),
               ("AST010", "os.execv"),                     # process replacement
               ("AST011", "extractall"),                   # Zip-Slip

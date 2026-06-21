@@ -2325,6 +2325,31 @@ _STAR_RESOLVABLE = frozenset({
     "subprocess.getstatusoutput",
 }) | _OS_EXEC_FAMILY
 
+
+def _const_seq_index(slice_node, n):
+    """The resolved 0-based index if `slice_node` is a CONSTANT integer subscript into an n-element
+    literal sequence (supporting a negative index), else None — so `(a, b)[1]` selects exactly `b`
+    while a dynamic `seq[i]` stays an unknown pick over the whole sequence (Codex F2: ignoring the
+    index both missed a dangerous element behind a benign-first one and FP'd the reverse)."""
+    s = slice_node
+    Index = getattr(ast, "Index", None)
+    if Index is not None and isinstance(s, Index):     # Python < 3.9 wraps the index expr
+        s = s.value
+    val = None
+    if isinstance(s, ast.Constant) and isinstance(s.value, int) and not isinstance(s.value, bool):
+        val = s.value
+    elif (isinstance(s, ast.UnaryOp) and isinstance(s.op, (ast.USub, ast.UAdd))
+          and isinstance(s.operand, ast.Constant) and isinstance(s.operand.value, int)
+          and not isinstance(s.operand.value, bool)):
+        # a NEGATIVE literal `[-1]` parses as UnaryOp(USub, Constant(1)), not Constant(-1) — unwrap it
+        # so a negative constant index is honored too (else it falls to the dynamic prefer-dangerous arm
+        # and FP'd `(os.system, math.sin)[-1]`).
+        val = -s.operand.value if isinstance(s.op, ast.USub) else s.operand.value
+    if val is None:
+        return None
+    i = val + n if val < 0 else val
+    return i if 0 <= i < n else None
+
 # Archive openers whose result object's `.extractall()` is the Zip-Slip sink (AST011). The
 # AST011 extractall arm fires ONLY when its receiver provably resolves to one of these
 # (convergence sweep gap 5: keying on the bare `extractall` leaf FP'd on pandas
@@ -2344,18 +2369,91 @@ class _VF:
     method-ref) into one. `canon` = dotted callable/module canonical ('os.system' / 'os' /
     'tarfile.open' / 'pathlib.Path' / None = unknown); `self_file` = the skill's own __file__ /
     Path(__file__); `archive` = an opened tar/zip archive; `mleaf`/`mrecv` = a bound method-ref leaf
-    + whether its receiver was an archive; `seq` (a nested _VF or None) = the REPRESENTATIVE element
-    of a literal sequence, so a `for x in [os.system]` / `archives[0]` unwraps it. The empty `_VF()`
-    is the bottom (a captured exception / opaque value)."""
-    __slots__ = ("canon", "self_file", "archive", "mleaf", "mrecv", "seq")
+    + whether its receiver was an archive; `seq` (a tuple of _VF or None) = the POSITIONAL elements of
+    a literal list/tuple, so `for x in [os.system]` joins them and `(a, b)[1]` selects EXACTLY `b`.
 
-    def __init__(self, canon=None, self_file=False, archive=False, mleaf=None, mrecv=False, seq=None):
+    `members` (a tuple of point _VF, or None for a point value) is the UNION of possible values a
+    name/expr can take — an IfExp `a if c else b`, a dynamic `seq[i]`, a for-target. The dispatch
+    enumerates members so a benign arm can NOT hide a dangerous sibling and arm ORDER never changes
+    findings (the join `_vf_join` is commutative / associative / idempotent — a set union). The
+    scalar fields of a union are the conservative SUMMARY (self_file/archive = any member; canon =
+    the common one or None; mleaf/mrecv = an archive method-ref if any member is one, else common).
+    The empty `_VF()` is the bottom (a captured exception / opaque value)."""
+    __slots__ = ("canon", "self_file", "archive", "mleaf", "mrecv", "seq", "members")
+
+    def __init__(self, canon=None, self_file=False, archive=False, mleaf=None, mrecv=False,
+                 seq=None, members=None):
         self.canon = canon
         self.self_file = self_file
         self.archive = archive
         self.mleaf = mleaf
         self.mrecv = mrecv
         self.seq = seq
+        self.members = members
+
+
+def _vf_members(vf):
+    """The point alternatives a (possibly union) _VF can take — itself for a point value."""
+    return vf.members if vf.members is not None else (vf,)
+
+
+def _seq_has_archive(seq):
+    """True if a positional seq (tuple of _VF) holds at least one archive element (round-9: the
+    archive timeline's 'sequence of archives' kind, now over positional elements)."""
+    return seq is not None and any(e.archive for e in seq)
+
+
+def _vf_dedup_key(vf):
+    """A hashable identity for a point _VF, so `_vf_join` deduplicates members (idempotence)."""
+    return (vf.canon, vf.self_file, vf.archive, vf.mleaf, vf.mrecv,
+            tuple(_vf_dedup_key(e) for e in vf.seq) if vf.seq is not None else None)
+
+
+def _vf_summary(ms):
+    """The conservative scalar summary of a >1 member union (see _VF). Boolean domains OR; `canon`
+    is the common one or None; the method-ref (leaf, recv) prefers an archive method-ref member so
+    AST011 fires through a union; `seq` is the positional element-wise join when every member carries
+    a seq of equal length, else None."""
+    canons = {m.canon for m in ms}
+    arch_ref = next(((m.mleaf, m.mrecv) for m in ms if m.mleaf == "extractall" and m.mrecv), None)
+    if arch_ref:
+        ml, mr = arch_ref
+    else:
+        leaves = {m.mleaf for m in ms}
+        ml = next(iter(leaves)) if len(leaves) == 1 else None
+        mr = any(m.mrecv for m in ms)
+    seqs = [m.seq for m in ms]
+    if all(s is not None for s in seqs) and len({len(s) for s in seqs}) == 1:
+        seq = tuple(_vf_join_all([s[i] for s in seqs]) for i in range(len(seqs[0])))
+    else:
+        seq = None
+    return _VF(canon=(next(iter(canons)) if len(canons) == 1 else None),
+               self_file=any(m.self_file for m in ms), archive=any(m.archive for m in ms),
+               mleaf=ml, mrecv=mr, seq=seq, members=tuple(ms))
+
+
+def _vf_join(a, b):
+    """COMMUTATIVE / associative / idempotent union of two _VF — a set union of their point members
+    (deduplicated). One member collapses back to a point; >1 yields a summary union carrying every
+    member for the dispatch to enumerate. This is the model the user mandated: `_VF` represents the
+    SET of possible values, not a first-truthy `a or b` representative."""
+    ms, seen = [], set()
+    for m in (*_vf_members(a), *_vf_members(b)):
+        k = _vf_dedup_key(m)
+        if k not in seen:
+            seen.add(k)
+            ms.append(m)
+    return ms[0] if len(ms) == 1 else _vf_summary(ms)
+
+
+def _vf_join_all(vfs):
+    """The union of a list of _VF (left fold of `_vf_join`); the bottom `_VF()` for an empty list."""
+    if not vfs:
+        return _VF()
+    acc = vfs[0]
+    for v in vfs[1:]:
+        acc = _vf_join(acc, v)
+    return acc
 
 
 def _resolve_tl(tl, pos):
@@ -2373,7 +2471,7 @@ def _resolve_tl(tl, pos):
     def kind(vf):
         if vf.archive:
             return "arch"
-        if vf.seq is not None and vf.seq.archive:
+        if _seq_has_archive(vf.seq):
             return "seqarch"
         return "other"
     last_arch = last_seq = None
@@ -2397,9 +2495,12 @@ def _resolve_tl(tl, pos):
         return True
     arch = live(last_arch, "arch")
     seqarch = (not arch) and live(last_seq, "seqarch")
-    seq = _VF(archive=True) if seqarch else (last.seq if (last.seq is not None and not last.seq.archive) else None)
+    # preserve the POSITIONAL seq tuple when it is a live sequence-of-archives OR a non-archive
+    # sequence (so a later `seq[i]` still honors its index); drop it only when an archive sequence
+    # has been masked by an unconditional non-archive rebind.
+    seq = last.seq if (seqarch or (last.seq is not None and not _seq_has_archive(last.seq))) else None
     return _VF(canon=last.canon, self_file=last.self_file, archive=arch,
-               mleaf=last.mleaf, mrecv=last.mrecv, seq=seq)
+               mleaf=last.mleaf, mrecv=last.mrecv, seq=seq, members=last.members)
 
 
 def _names_in_target(target):
@@ -2509,16 +2610,17 @@ def _is_own_file_target(node, is_path_ctor=None) -> bool:
         return node.id == "__file__"
     if isinstance(node, ast.Call):
         f = node.func
-        if isinstance(f, (ast.Name, ast.Attribute)):
-            # The Path-ctor test is POSITION-AWARE when a resolver is supplied (so a param /
-            # for-target / local rebind named `Path`/`pl.Path` is shadow-masked — round-4 audit
-            # pass 5 FP); a literal leaf-name fallback covers a None resolver.
-            if is_path_ctor is not None:
-                is_path = is_path_ctor(f)
-            else:
-                is_path = (f.attr == "Path") if isinstance(f, ast.Attribute) else (f.id == "Path")
-        elif isinstance(f, ast.Call) and is_path_ctor is not None:
-            is_path = is_path_ctor(f)       # inline getattr(<base>, "Path")(__file__) ctor (round-7)
+        # The Path-ctor test is POSITION- and MEMBERS-aware when a resolver is supplied — it routes
+        # EVERY ctor-func shape (Name / Attribute / inline getattr Call / an IfExp or subscript UNION
+        # `(safe if c else Path)(__file__)`) through is_path_ctor, so a param / for-target / local
+        # rebind named `Path` is shadow-masked (round-4 FP) AND a Path ctor hidden in a union arm is
+        # still recognized (workflow re-sweep FN). A literal leaf-name fallback covers a None resolver.
+        if is_path_ctor is not None:
+            is_path = is_path_ctor(f)
+        elif isinstance(f, ast.Attribute):
+            is_path = (f.attr == "Path")
+        elif isinstance(f, ast.Name):
+            is_path = (f.id == "Path")
         else:
             is_path = False
         if is_path and len(node.args) == 1 and not node.keywords:
@@ -2698,11 +2800,12 @@ class _AstAuditor(ast.NodeVisitor):
         return name
 
     def _path_ctor_at(self, func_node) -> bool:
-        """True if a call's func resolves to the pathlib.Path CONSTRUCTOR as of its position — via
-        the unified _func_canon -> _canon (walrus / getattr / alias / shadow / capture all handled
-        there). round-9: no longer reads the old alias timeline / _local_binding_scope."""
+        """True if a call's func resolves to the pathlib.Path CONSTRUCTOR as of its position — via the
+        unified _facts_of (walrus / getattr / alias / shadow / capture all handled there), MEMBERS-
+        aware so a UNION `(safe if c else pathlib.Path)(__file__)` is recognized in EITHER arm (the
+        workflow re-sweep FN: a benign arm hid the Path ctor and the self-file write read GREEN)."""
         pos = (getattr(func_node, "lineno", 0), getattr(func_node, "col_offset", 0))
-        return self._func_canon(func_node, pos) == "pathlib.Path"
+        return any(m.canon == "pathlib.Path" for m in _vf_members(self._facts_of(func_node, pos)))
 
     def _canon(self, name, pos=None):
         """Canonicalize a dotted call name to its real `module.X` over the UNIFIED _VF timeline
@@ -2748,45 +2851,6 @@ class _AstAuditor(ast.NodeVisitor):
         callable/module alias (those resolve). Used by _canon's outer-scope global fallback."""
         return bool(head) and head not in self.assign_aliases \
             and any(head in binds for binds in self.fact_scopes)
-
-    def _func_canon(self, func, pos):
-        """Canonical dotted name of a call's func, POSITION-AWARE — the single entry point so
-        every dotted rule AND the archive-opener / Path-ctor gates see the inline-getattr form
-        uniformly. An inline `getattr(<base>, "<literal>")(...)` resolves to `<base>.<literal>`
-        ONLY when the getattr head itself resolves to the BUILTIN getattr (bare-unbound or
-        `builtins.getattr`) — so a locally-shadowed `def f(getattr): getattr(os,"system")` does
-        NOT dispatch (round-7 audit FP) — and the base is resolved RECURSIVELY (so `builtins.
-        getattr`, a module alias, or a nested getattr all work; round-7 audit FN)."""
-        NE = getattr(ast, "NamedExpr", None)
-        if NE is not None and isinstance(func, NE):
-            return self._func_canon(func.value, pos)   # `(run := os.system)(...)` — the walrus VALUE
-                                                       # is the callee (round-8 audit sibling-form E).
-        if isinstance(func, ast.IfExp):                # `(a if c else b)(...)` — either arm is the
-            return self._func_canon(func.body, pos) or self._func_canon(func.orelse, pos)  # callee (round-10)
-        if isinstance(func, ast.Subscript):            # `[os.system][0](...)` / `(os.system,)[0](...)` —
-            v = func.value                             # a literal-seq subscript selects a callee (round-10)
-            if isinstance(v, (ast.List, ast.Tuple, ast.Set)):
-                for e in v.elts:
-                    c = self._func_canon(e, pos)
-                    if c and "." in c:                 # prefer a module-qualified (dangerous) canonical
-                        return c
-                return None
-            if isinstance(v, ast.Name):                # a Name bound to a sequence (`seq=[os.system]; seq[0]()`)
-                f = self._facts_at(v.id, pos)
-                return f.seq.canon if (f and f.seq is not None) else None
-        dn = _dotted_name(func)
-        if dn:
-            return self._canon(dn, pos)
-        if isinstance(func, ast.Call) and len(func.args) >= 2 \
-                and isinstance(func.args[1], ast.Constant) and isinstance(func.args[1].value, str):
-            # resolve the getattr HEAD through _func_canon (not _dotted_name) so a walrus-bound
-            # getattr `(g := getattr)(os,"system")(...)` dispatches too (round-8 re-sweep); still
-            # shadow-safe — a locally-shadowed getattr param resolves to None, not the builtin.
-            if self._func_canon(func.func, pos) in ("getattr", "builtins.getattr"):
-                base = self._func_canon(func.args[0], pos)
-                if base:
-                    return self._canon(base + "." + func.args[1].value, pos)
-        return None
 
     def _capture_masked(self, name, pos):
         """True if `name` is, AT pos, an `except … as` / `match` CAPTURE (the caught exception /
@@ -2858,21 +2922,12 @@ class _AstAuditor(ast.NodeVisitor):
                 return node.args[0], node.args[1].value
             return None
 
-        def seq_rep(elts, pos):
-            els = [eval_expr(e, pos) for e in elts]
-            return _VF(
-                canon=next((e.canon for e in els if e.canon and "." in e.canon), None),
-                archive=any(e.archive for e in els),
-                self_file=any(e.self_file for e in els),
-                mleaf=next((e.mleaf for e in els if e.mleaf), None),
-                mrecv=any(e.mrecv for e in els),
-            )
-
         def is_path_ctor(func_node):
             # SELF-CONTAINED pathlib.Path-ctor check (via eval_expr, not the old _path_ctor_at /
-            # alias timeline) — so _scope_facts has no dependency on the four old walkers.
+            # alias timeline) — so _scope_facts has no dependency on the four old walkers. MEMBERS-
+            # aware so a union `(safe if c else Path)(__file__)` is recognized in either arm.
             fp = (getattr(func_node, "lineno", 0), getattr(func_node, "col_offset", 0))
-            return eval_expr(func_node, fp).canon == "pathlib.Path"
+            return any(m.canon == "pathlib.Path" for m in _vf_members(eval_expr(func_node, fp)))
 
         def eval_expr(node, pos):
             if NE is not None and isinstance(node, NE):
@@ -2895,20 +2950,27 @@ class _AstAuditor(ast.NodeVisitor):
                     canon = (base.canon + "." + ga[1]) if base.canon else None
                     return _VF(canon=canon, mleaf=ga[1], mrecv=base.archive)
                 return _VF()
-            if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-                return _VF(seq=seq_rep(node.elts, pos))
+            if isinstance(node, (ast.List, ast.Tuple)):
+                # POSITIONAL elements — a literal list/tuple, so `(a, b)[1]` selects EXACTLY `b`. A
+                # SET literal is unordered / not indexable, so it carries no positional seq.
+                return _VF(seq=tuple(eval_expr(e, pos) for e in node.elts))
             if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-                return _VF(seq=eval_expr(node.elt, pos))
+                # a comprehension's length is unknown -> a single representative element (its index
+                # cannot be honored; the dynamic-index join below collapses to that element).
+                return _VF(seq=(eval_expr(node.elt, pos),))
             if isinstance(node, ast.Subscript):
                 v = eval_expr(node.value, pos)
-                return v.seq if v.seq is not None else _VF()
+                if v.seq is None:
+                    return _VF()
+                idx = _const_seq_index(node.slice, len(v.seq))
+                # a CONSTANT index selects EXACTLY that element; a dynamic index could pick ANY -> the
+                # commutative union of all elements (no FN, no order/index dependence).
+                return v.seq[idx] if idx is not None else _vf_join_all(list(v.seq))
             if isinstance(node, ast.IfExp):
-                a, b = eval_expr(node.body, pos), eval_expr(node.orelse, pos)
-                # OR-combine across arms (round-10): EITHER dangerous arm makes the result dangerous —
-                # so a name bound to `os.system if c else os.popen` resolves to a dangerous callable.
-                return _VF(self_file=a.self_file or b.self_file, archive=a.archive or b.archive,
-                           canon=a.canon or b.canon, mleaf=a.mleaf or b.mleaf, mrecv=a.mrecv or b.mrecv,
-                           seq=a.seq or b.seq)
+                # the value is the SET of both arms (commutative union) — not a first-truthy / danger-
+                # preferred representative. The dispatch enumerates members, so a benign arm can not
+                # hide a dangerous one and arm ORDER never changes findings (user-mandated set model).
+                return _vf_join(eval_expr(node.body, pos), eval_expr(node.orelse, pos))
             return _VF()
 
         def bind_target(target, value, pos, cond):
@@ -2943,7 +3005,8 @@ class _AstAuditor(ast.NodeVisitor):
                 elif isinstance(n, (ast.For, ast.AsyncFor)):
                     if isinstance(n.target, ast.Name):
                         it = eval_expr(n.iter, pos)
-                        add(n.target.id, pos, it.seq if it.seq is not None else _VF(), cond)
+                        # the loop var takes ANY element -> the commutative union of the positional seq
+                        add(n.target.id, pos, _vf_join_all(list(it.seq)) if it.seq is not None else _VF(), cond)
                     else:
                         for nm in _names_in_target(n.target):
                             add(nm, pos, _VF(), cond)
@@ -2976,75 +3039,6 @@ class _AstAuditor(ast.NodeVisitor):
                 return r
         return None
 
-    def _method_ref_at(self, name_node):
-        """(leaf, receiver_is_archive) for a Name holding a method reference AS OF its position over
-        the unified _VF timeline (capture-masked, cross-scope), or None. round-9."""
-        pos = (getattr(name_node, "lineno", 0), getattr(name_node, "col_offset", 0))
-        f = self._facts_at(name_node.id, pos)
-        return (f.mleaf, f.mrecv) if (f is not None and f.mleaf is not None) else None
-
-    def _func_attr(self, func):
-        """The method leaf a call invokes: a direct `obj.attr`, an inline walrus
-        `(a := t.extractall)(…)`, OR a Name bound in scope to a method reference AS OF its
-        position (`ex = t.extractall` / `fn = getattr(t, "extractall")` / transitive / unpack)."""
-        NE = getattr(ast, "NamedExpr", None)
-        if NE is not None and isinstance(func, NE):
-            return self._func_attr(func.value)
-        if isinstance(func, ast.Attribute):
-            return func.attr
-        if isinstance(func, ast.Name):
-            info = self._method_ref_at(func)
-            return info[0] if info else None
-        return None
-
-    def _name_archive_state(self, name_node):
-        """The 'arch'/'seqarch'/'other' state of a Name as of its position over the unified _VF
-        timeline (cond-aware archive via _resolve_tl, capture-masked, cross-scope). round-9."""
-        pos = (getattr(name_node, "lineno", 0), getattr(name_node, "col_offset", 0))
-        f = self._facts_at(name_node.id, pos)
-        if f and f.archive:
-            return "arch"
-        if f and f.seq is not None and f.seq.archive:
-            return "seqarch"
-        return "other"
-
-    def _is_archive_expr(self, node) -> bool:
-        """True if `node` PROVABLY evaluates to a tarfile/zipfile archive object: an opener
-        Call (canon-resolved), an IfExp whose either arm is an archive, a Name bound to one in
-        scope (assign / with-as / transitive / walrus, position-aware), or an indexed element
-        of a sequence-of-archives (`archives[0]`). A pandas `.str` accessor, a bs4 object, an
-        opaque param is NOT provable, so its `.extractall()` does not fire AST011."""
-        NE = getattr(ast, "NamedExpr", None)
-        while NE is not None and isinstance(node, NE):       # NESTED walrus (round-10): unwrap fully
-            node = node.value
-        if isinstance(node, ast.Call):
-            return self._func_canon(node.func,
-                               (getattr(node.func, "lineno", 0), getattr(node.func, "col_offset", 0))) in _ARCHIVE_OPENERS
-        if isinstance(node, ast.IfExp):
-            return self._is_archive_expr(node.body) or self._is_archive_expr(node.orelse)
-        if isinstance(node, ast.Subscript):
-            if isinstance(node.value, ast.Name):
-                return self._name_archive_state(node.value) == "seqarch"   # archives[0].extractall()
-            if isinstance(node.value, (ast.List, ast.Tuple)):  # INLINE [opener][0] / (opener,)[0] (round-10)
-                return any(self._is_archive_expr(e) for e in node.value.elts)
-        if isinstance(node, ast.Name):
-            return self._name_archive_state(node) == "arch"
-        return False
-
-    def _extractall_on_archive(self, func) -> bool:
-        """True if the `extractall` receiver is a provable archive — a direct
-        `archive.extractall()` (incl. inline walrus) OR a method-ref `ex = archive.extractall;
-        ex()` whose receiver was an archive. Gap-5 provenance gate for AST011."""
-        NE = getattr(ast, "NamedExpr", None)
-        while NE is not None and isinstance(func, NE):       # NESTED walrus (round-10)
-            func = func.value
-        if isinstance(func, ast.Attribute):
-            return self._is_archive_expr(func.value)
-        if isinstance(func, ast.Name):
-            info = self._method_ref_at(func)
-            return info[1] if info else False
-        return False
-
     def _self_target(self, node) -> bool:
         """The skill's own running file: inline `__file__`/`Path(__file__)` (walrus unwrapped), OR a
         Name resolving to it over the unified _VF timeline (capture-masked, cross-scope). round-9."""
@@ -3055,6 +3049,90 @@ class _AstAuditor(ast.NodeVisitor):
             f = self._facts_at(node.id, pos)
             return bool(f and f.self_file)
         return False
+
+    def _getattr_call_parts(self, node, pos):
+        """(base_node, attr_str) if `node` is an inline `getattr(<base>, "<literal>")` whose getattr
+        head resolves (MEMBERS-aware) to the BUILTIN getattr — the visit-time twin of the build-time
+        is_getattr_call, so _facts_of canonicalizes `getattr(os, "system")(...)` like _scope_facts."""
+        if not (len(node.args) >= 2 and isinstance(node.args[1], ast.Constant)
+                and isinstance(node.args[1].value, str)):
+            return None
+        if any(m.canon in ("getattr", "builtins.getattr")
+               for m in _vf_members(self._facts_of(node.func, pos))):
+            return node.args[0], node.args[1].value
+        return None
+
+    def _facts_of(self, node, pos):
+        """Visit-time abstract value facts (members + positional seq + the four provenance domains)
+        for any callee/expr node — the SINGLE union-aware resolver the call dispatch reads, so a UNION
+        callee (an IfExp arm / a literal-seq element / a bound name) is enumerated as a SET (arm order
+        never changes findings) and a literal-seq subscript honors its index. Mirrors the build-time
+        eval_expr but reads the unified timeline (_facts_at) for names; bottoms out at the same
+        primitives the per-domain readers use (archive openers / getattr / the Path ctor)."""
+        NE = getattr(ast, "NamedExpr", None)
+        if NE is not None and isinstance(node, NE):
+            return self._facts_of(node.value, pos)
+        if _is_own_file_target(node, self._path_ctor_at):
+            return _VF(self_file=True)
+        if isinstance(node, ast.Name):
+            f = self._facts_at(node.id, pos)
+            # canon comes from the AUTHORITATIVE _canon (which adds the cross-scope global-rebind
+            # fallback `global x; x = os.system` that the raw timeline lacks); the other domains
+            # (archive / self_file / method-ref / seq) come from the timeline _VF. A UNION keeps its
+            # members verbatim (each carries its own canon) so the dispatch enumerates them.
+            c = self._canon(node.id, pos)
+            if f is None:
+                return _VF(canon=c)
+            if f.members is not None:
+                return f
+            return _VF(canon=c, self_file=f.self_file, archive=f.archive,
+                       mleaf=f.mleaf, mrecv=f.mrecv, seq=f.seq)
+        if isinstance(node, ast.Attribute):
+            base = self._facts_of(node.value, pos)
+            canon = (base.canon + "." + node.attr) if base.canon else None
+            return _VF(canon=canon, mleaf=node.attr, mrecv=base.archive)
+        if isinstance(node, ast.Call):
+            if any(m.canon in _ARCHIVE_OPENERS
+                   for m in _vf_members(self._facts_of(node.func, pos))):
+                return _VF(archive=True)
+            ga = self._getattr_call_parts(node, pos)
+            if ga:
+                base = self._facts_of(ga[0], pos)
+                canon = (base.canon + "." + ga[1]) if base.canon else None
+                return _VF(canon=canon, mleaf=ga[1], mrecv=base.archive)
+            return _VF()
+        if isinstance(node, (ast.List, ast.Tuple)):
+            return _VF(seq=tuple(self._facts_of(e, pos) for e in node.elts))
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            return _VF(seq=(self._facts_of(node.elt, pos),))
+        if isinstance(node, ast.Subscript):
+            v = self._facts_of(node.value, pos)
+            if v.seq is None:
+                return _VF()
+            idx = _const_seq_index(node.slice, len(v.seq))
+            return v.seq[idx] if idx is not None else _vf_join_all(list(v.seq))
+        if isinstance(node, ast.IfExp):
+            return _vf_join(self._facts_of(node.body, pos), self._facts_of(node.orelse, pos))
+        return _VF()
+
+    def _callee_canons(self, node, pos):
+        """The DEDUPLICATED set of candidate canonical callee names of `node` — the union members the
+        dispatch fires rules over (commutative; a benign member can't suppress a dangerous one). Always
+        non-empty (a single None for a fully-opaque callee, preserving the point-value dispatch)."""
+        out, seen = [], set()
+        for m in _vf_members(self._facts_of(node, pos)):
+            if m.canon not in seen:
+                seen.add(m.canon)
+                out.append(m.canon)
+        return out or [None]
+
+    def _callee_is_archive_extract(self, node, pos):
+        """True if ANY union member of the callee is a provable archive `.extractall` method-ref —
+        the members-aware AST011 gate, so `(tarfile.open(p).extractall if c else f)()`, a seq-subscript
+        `[t.extractall][0]()`, and a bound method-ref all fire uniformly (workflow re-sweep FNs: the old
+        _func_attr/_extractall_on_archive missed IfExp/Subscript callee shapes)."""
+        return any(m.mleaf == "extractall" and m.mrecv
+                   for m in _vf_members(self._facts_of(node, pos)))
 
     def visit_Module(self, node):
         # round-9: ONE source. capture_scopes (the except/match overlay) first — _scope_facts reads
@@ -3101,10 +3179,26 @@ class _AstAuditor(ast.NodeVisitor):
         ))
 
     def visit_Call(self, node):
-        name = self._func_canon(node.func,
-                           (getattr(node.func, "lineno", 0), getattr(node.func, "col_offset", 0)))
+        pos = (getattr(node.func, "lineno", 0), getattr(node.func, "col_offset", 0))
+        # the callee is resolved to the SET of possible canonical names (an IfExp arm, a literal-seq
+        # element, a bound union, a walrus — all enumerated). Every name-keyed rule runs PER candidate
+        # so a benign member can not hide a dangerous one and arm/element ORDER never changes findings
+        # (the user-mandated set model); `emit` deduplicates by rule_id so a union of same-rule members
+        # (e.g. `os.system if c else os.popen`) fires AST003 exactly once.
+        cands = self._callee_canons(node.func, pos)
         arg0 = node.args[0] if node.args else None
+        emitted = set()
 
+        def emit(rule_id, severity, why, fix=""):
+            if rule_id not in emitted:
+                emitted.add(rule_id)
+                self._add(node, rule_id, severity, why, fix)
+
+        for name in cands:
+            self._dispatch_call_name(node, name, arg0, pos, emit)
+        self.generic_visit(node)
+
+    def _dispatch_call_name(self, node, name, arg0, pos, emit):
         # AST009 — skill rewrites its OWN running file at runtime (the write TARGET is
         # INLINE __file__ / Path(__file__), not a derived sibling). Reads and other-path
         # writes never fire. Covers builtin open / Path(__file__).open / write_text|
@@ -3118,23 +3212,23 @@ class _AstAuditor(ast.NodeVisitor):
                 and self._self_target(_arg_or_kw(node, 0, "file")):
             # builtin open / io.open (io.open IS builtins.open) / an aliased open (Codex r3)
             if _write_mode(node, 1):
-                self._add(node, "AST009", "HIGH",
-                          "open(__file__, <write>) writes the skill's own running file — runtime self-modification defeats a pre-install audit (audited-once, mutates-later)")
+                emit("AST009", "HIGH",
+                     "open(__file__, <write>) writes the skill's own running file — runtime self-modification defeats a pre-install audit (audited-once, mutates-later)")
         elif name == "os.open" and self._self_target(_arg_or_kw(node, 0, "path")) \
                 and _os_open_writes(_arg_or_kw(node, 1, "flags")):
             # low-level os.open(__file__, O_WRONLY|O_TRUNC|…) + os.write — the POSIX-fd
             # form of a self-rewrite (Codex r3 sweep); flag at the writable open site.
-            self._add(node, "AST009", "HIGH",
-                      "os.open(__file__, <write flags>) opens the skill's own running file for writing — runtime self-modification (low-level POSIX form)")
+            emit("AST009", "HIGH",
+                 "os.open(__file__, <write flags>) opens the skill's own running file for writing — runtime self-modification (low-level POSIX form)")
         elif (isinstance(node.func, ast.Attribute) and node.func.attr == "open"
               and self._self_target(node.func.value) and _write_mode(node, 0)):
-            self._add(node, "AST009", "HIGH",
-                      "Path(__file__).open(<write>) writes the skill's own running file — runtime self-modification")
+            emit("AST009", "HIGH",
+                 "Path(__file__).open(<write>) writes the skill's own running file — runtime self-modification")
         elif (isinstance(node.func, ast.Attribute)
               and node.func.attr in ("write_text", "write_bytes")
               and self._self_target(node.func.value)):
-            self._add(node, "AST009", "HIGH",
-                      "." + node.func.attr + "(...) targets the skill's own file (__file__) — runtime self-modification")
+            emit("AST009", "HIGH",
+                 "." + node.func.attr + "(...) targets the skill's own file (__file__) — runtime self-modification")
         # NOTE: Path(__file__).rename/.replace(dst) is deliberately NOT flagged — like the
         # already-GREEN os.rename/os.replace(__file__, dst), __file__ there is the SOURCE moved
         # AWAY (a backup/relocation), not the inject TARGET. AST009 is scoped to CONTENT rewrite
@@ -3143,39 +3237,39 @@ class _AstAuditor(ast.NodeVisitor):
         elif name == "os.truncate" and self._self_target(_arg_or_kw(node, 0, "path")):
             # os.truncate(__file__, 0) zero-outs the running file (path form; os.ftruncate is on
             # an fd and out of scope) — runtime self-modification (round-6 sweep AST009-truncate).
-            self._add(node, "AST009", "HIGH",
-                      "os.truncate(__file__, ...) truncates the skill's own running file — runtime self-modification")
+            emit("AST009", "HIGH",
+                 "os.truncate(__file__, ...) truncates the skill's own running file — runtime self-modification")
         elif (name in ("fileinput.input", "fileinput.FileInput")
               and self._self_target(_arg_or_kw(node, 0, "files")) and _inplace_edit(node)):
             # fileinput with inplace=True redirects stdout INTO __file__, rewriting it in place —
             # the stdlib in-place-edit idiom turned on the running file (round-6 sweep AST009-fileinput).
-            self._add(node, "AST009", "HIGH",
-                      "fileinput.input(__file__, inplace=True) rewrites the skill's own running file in place — runtime self-modification")
+            emit("AST009", "HIGH",
+                 "fileinput.input(__file__, inplace=True) rewrites the skill's own running file in place — runtime self-modification")
         elif (name in ("os.replace", "os.rename", "os.symlink", "os.link", "shutil.copyfile",
                        "shutil.copy", "shutil.copy2", "shutil.move")
               and self._self_target(_arg_or_kw(node, 1, "dst"))):
             # destination = __file__ (positional arg1 OR `dst=` keyword): overwrite (replace/
             # rename/copy*/move) OR relink (symlink/link) the running file with attacker-chosen
             # content (round-6 sweep AST009-symlink; CONFIRM sweep D-1: the dst= keyword form leaked).
-            self._add(node, "AST009", "HIGH",
-                      name + "(..., __file__) overwrites/relinks the skill's own running file — runtime self-modification")
+            emit("AST009", "HIGH",
+                 name + "(..., __file__) overwrites/relinks the skill's own running file — runtime self-modification")
 
         if name in _CODE_EXEC_BUILTINS:
             if arg0 is not None and _uses_constructor(arg0):
-                self._add(node, "AST008", "CRITICAL",
-                          name + "() over a string built from char codes / decoded bytes — obfuscated payload execution")
+                emit("AST008", "CRITICAL",
+                     name + "() over a string built from char codes / decoded bytes — obfuscated payload execution")
             elif arg0 is None or not _is_literal(arg0):
-                self._add(node, "AST001", "CRITICAL",
-                          name + "() over a non-literal argument — dynamic code execution")
+                emit("AST001", "CRITICAL",
+                     name + "() over a non-literal argument — dynamic code execution")
 
         elif name in self.alias:
-            self._add(node, "AST002", "CRITICAL",
-                      "call to '" + name + "', an alias of " + self.alias[name] + "() — hidden dynamic code execution")
+            emit("AST002", "CRITICAL",
+                 "call to '" + name + "', an alias of " + self.alias[name] + "() — hidden dynamic code execution")
 
         elif name in ("os.system", "os.popen"):
             nonlit = arg0 is not None and not _is_literal(arg0)
-            self._add(node, "AST003", "CRITICAL" if nonlit else "HIGH",
-                      name + "()" + (" with a non-literal command — command injection" if nonlit else " — shell execution"))
+            emit("AST003", "CRITICAL" if nonlit else "HIGH",
+                 name + "()" + (" with a non-literal command — command injection" if nonlit else " — shell execution"))
 
         elif name is not None and name.startswith("subprocess."):
             shell_true = any(
@@ -3184,12 +3278,12 @@ class _AstAuditor(ast.NodeVisitor):
             )
             if shell_true:
                 nonlit = arg0 is not None and not _is_literal(arg0)
-                self._add(node, "AST003", "CRITICAL" if nonlit else "HIGH",
-                          name + "(..., shell=True)" + (" with a non-literal command — command injection" if nonlit else " — prefer an argument list over shell=True"))
+                emit("AST003", "CRITICAL" if nonlit else "HIGH",
+                     name + "(..., shell=True)" + (" with a non-literal command — command injection" if nonlit else " — prefer an argument list over shell=True"))
 
         elif name in ("pickle.loads", "marshal.loads"):
-            self._add(node, "AST004", "CRITICAL",
-                      name + "() deserializes arbitrary objects — remote code execution")
+            emit("AST004", "CRITICAL",
+                 name + "() deserializes arbitrary objects — remote code execution")
 
         elif name in _OS_EXEC_FAMILY:
             # The PROGRAM-PATH arg index is signature-dependent: os.spawn*(mode, file,
@@ -3198,27 +3292,26 @@ class _AstAuditor(ast.NodeVisitor):
             idx = 1 if ".spawn" in name else 0
             prog = node.args[idx] if len(node.args) > idx else None
             nonlit = prog is not None and not _is_literal(prog)
-            self._add(node, "AST010", "CRITICAL" if nonlit else "HIGH",
-                      name + "() replaces/spawns a process image"
-                      + (" with a non-literal program path — dynamic process execution (AST003 sibling)"
-                         if nonlit else " — process execution (a literal exec of a fixed program)"))
+            emit("AST010", "CRITICAL" if nonlit else "HIGH",
+                 name + "() replaces/spawns a process image"
+                 + (" with a non-literal program path — dynamic process execution (AST003 sibling)"
+                    if nonlit else " — process execution (a literal exec of a fixed program)"))
 
         elif (name == "shutil.unpack_archive"
-              or (self._func_attr(node.func) == "extractall"
-                  and self._extractall_on_archive(node.func)
+              or (self._callee_is_archive_extract(node.func, pos)
                   and not _extract_is_guarded(node))):
-            # The extractall arm is gated on RECEIVER PROVENANCE (_extractall_on_archive):
-            # it fires only when the receiver provably resolves to a tarfile/zipfile archive
-            # (directly or through a method-ref). Keying on the bare `extractall` leaf alone
-            # FP'd on the common pandas `Series.str.extractall` and any non-archive
-            # `.extractall()` (convergence sweep gap 5) — and bare `.extract` was already
-            # excluded for the same collision reason (pandas `.str.extract`, bs4). The
-            # module-qualified `shutil.unpack_archive` is unambiguous, so it needs no gate.
-            # An OPAQUE-receiver extractall (archive object from another fn/file) is OOS
-            # (cross-function flow, THREAT_MODEL #4), as is single-member `.extract()`.
-            self._add(node, "AST011", "MEDIUM",
-                      "archive extractall / unpack_archive without a member filter — Zip-Slip "
-                      "path traversal can overwrite files outside the target dir (e.g. ~/.ssh, ~/.claude)")
+            # The extractall arm is gated on RECEIVER PROVENANCE, now MEMBERS-aware
+            # (_callee_is_archive_extract): it fires only when a callee union member provably resolves
+            # to a tarfile/zipfile archive `.extractall` — a direct `archive.extractall()`, a method-
+            # ref `ex = archive.extractall; ex()`, OR one selected through an IfExp arm / literal-seq
+            # subscript (workflow re-sweep FN: the old _func_attr/_extractall_on_archive missed those
+            # union shapes). Keying on the bare `extractall` leaf alone FP'd on pandas
+            # `Series.str.extractall` and any non-archive `.extractall()` (convergence sweep gap 5);
+            # `shutil.unpack_archive` is module-qualified and unambiguous. An OPAQUE-receiver
+            # extractall is OOS (cross-function flow, THREAT_MODEL #4), as is single-member `.extract()`.
+            emit("AST011", "MEDIUM",
+                 "archive extractall / unpack_archive without a member filter — Zip-Slip "
+                 "path traversal can overwrite files outside the target dir (e.g. ~/.ssh, ~/.claude)")
 
         elif name == "yaml.load":
             safe = any(
@@ -3226,20 +3319,18 @@ class _AstAuditor(ast.NodeVisitor):
                 for kw in node.keywords
             )
             if not safe:
-                self._add(node, "AST005", "HIGH",
-                          "yaml.load() without SafeLoader — RCE on crafted YAML; use yaml.safe_load")
+                emit("AST005", "HIGH",
+                     "yaml.load() without SafeLoader — RCE on crafted YAML; use yaml.safe_load")
 
         elif name == "getattr":
             if len(node.args) >= 2 and not _is_literal(node.args[1]):
-                self._add(node, "AST006", "HIGH",
-                          "getattr() with a non-literal attribute name — dynamic dispatch can reach dangerous methods (e.g. os.system)")
+                emit("AST006", "HIGH",
+                     "getattr() with a non-literal attribute name — dynamic dispatch can reach dangerous methods (e.g. os.system)")
 
         elif name in ("__import__", "importlib.import_module"):
             if arg0 is not None and not _is_literal(arg0):
-                self._add(node, "AST007", "HIGH",
-                          name + "() with a non-literal module name — dynamic import")
-
-        self.generic_visit(node)
+                emit("AST007", "HIGH",
+                     name + "() with a non-literal module name — dynamic import")
 
 
 def ast_scan(path: Path, rel: str) -> list[Finding]:

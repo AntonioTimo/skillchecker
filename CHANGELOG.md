@@ -89,6 +89,32 @@ backstop). Still no new rule IDs.
   alias), so the per-scope reset is authoritative everywhere; the genuine cross-scope global-rebind
   (`x=None; … global x; x=os.system; x(c)`) and `def`-then-`x=os.system` still fire.
 
+### Fixed — round-11: SET-valued union resolution (Codex reject of the round-10 `a or b` collapse)
+
+Codex rejected the round-10 union handling: a callee that denotes a SET of possible callables — an
+`IfExp` arm, a literal-sequence element, a bound name, a method-ref through them — was collapsed to a
+single first-truthy / danger-preferred representative, so a **benign arm could hide a dangerous one**
+(`(math.sin if c else os.system)(cmd)` read GREEN), a literal subscript **ignored its index** (both an
+FN `(math.sin, os.system)[1]` and an FP `(os.system, math.sin)[1]`), and findings depended on arm ORDER
+(not commutative). An adversarial re-sweep confirmed the class plus eleven siblings (self-file `open`/
+`os.open`/`Path` ctor and archive `.extractall` hidden behind a benign union arm — the danger set was
+incomplete AND a single canon can't carry a union).
+
+The fix makes `_VF` REPRESENT THE SET: `members` (the union alternatives) + a POSITIONAL `seq` (tuple
+of element facts, so `(a, b)[1]` selects exactly `b`). A single commutative / associative / idempotent
+`_vf_join` builds unions; a unified visit-time `_facts_of` resolves any callee to its member set and the
+dispatch enumerates them (firing every member's rule, deduplicated by rule_id) — so a benign member
+never hides a dangerous one, a constant index (incl. negative) is honored positionally, a dynamic index
+is conservative (fire if ANY element is dangerous), and a cross-rule union fires BOTH rules
+(`(os.system if c else pickle.loads)(x)` → AST003 **and** AST004), order-independent. The five old
+per-domain visit-time resolvers (`_func_canon` / `_func_attr` / `_method_ref_at` / `_name_archive_state`
+/ `_is_archive_expr` / `_extractall_on_archive`) and the round-10 `_danger_pref` / `_canon_is_dangerous`
+collapse helpers became dead and were DELETED — `_facts_of` + the build-time `eval_expr` are now the sole
+binding/resolution source. Golden byte-identical on all 23 fixtures (the union changes are additive on
+new forms); no new rule IDs. Remaining OOS (documented, value-flow / obfuscation tail): a closure
+free-variable / `global`-rebind resolved at call time, a comprehension loop-variable (its own scope), and
+a dict/set-literal subscript callee (not positional).
+
 ### Refactor — round-9: unified ValueFacts evaluator (single binding/resolution source)
 
 The four per-scope timeline walkers (callable-alias / `__file__` / archive / method-ref) that the

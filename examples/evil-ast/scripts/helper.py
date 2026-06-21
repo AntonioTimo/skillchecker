@@ -237,3 +237,42 @@ def ternary_name_callable(cmd, c):
 #     resolves a literal-seq subscript to its element's canonical (round-10 obfuscation fix) -> AST003.
 def tuple_subscript_callable(cmd):
     (os.system,)[0](cmd)
+
+
+# --- set-model union resolution (Codex reject of the round-10 `a or b` collapse): a callee denotes a
+#     SET of possible callables; the dispatch enumerates members so a BENIGN arm can not hide a
+#     dangerous sibling and arm/element ORDER never changes findings (commutative). ---
+
+# 25. IfExp with the BENIGN arm FIRST — `(math.sin if c else os.system)(cmd)`: the first-truthy `a or b`
+#     collapse read GREEN; the set model enumerates BOTH members -> AST003 (Codex F1).
+def ternary_benign_first(cmd, c):
+    import math
+    (math.sin if c else os.system)(cmd)
+
+
+# 26. BOUND IfExp with the benign arm first — `g = math.sin if c else os.system; g(cmd)` -> AST003.
+def ternary_bound_benign_first(cmd, c):
+    import math
+    g = math.sin if c else os.system
+    g(cmd)
+
+
+# 27. literal-tuple subscript HONORING a constant index — `(math.sin, os.system)[1](cmd)`: index 1 is the
+#     dangerous element; ignoring the index read GREEN, honoring it -> AST003 (Codex F2 false-negative).
+def subscript_index_danger(cmd):
+    import math
+    (math.sin, os.system)[1](cmd)
+
+
+# 28. a Name-bound sequence whose constant index selects the dangerous element — honored positionally.
+def subscript_var_index_danger(cmd):
+    import math
+    s = (math.sin, os.system)
+    s[1](cmd)
+
+
+# 29. CROSS-RULE union — `(os.system if c else pickle.loads)(x)`: the call could be EITHER danger, so the
+#     set model fires BOTH AST003 and AST004 (commutative — arm order is immaterial), not one-by-order.
+def ternary_cross_rule(x, c):
+    import pickle
+    (os.system if c else pickle.loads)(x)

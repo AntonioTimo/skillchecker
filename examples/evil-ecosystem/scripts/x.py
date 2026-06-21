@@ -276,3 +276,20 @@ def unpack_scalar_then_seq(path):
     z = tarfile.open(path)
     z = [tarfile.open(path)]
     z[0].extractall("/srv/victim23")
+
+
+# --- set-model (Codex reject): the archive-method-ref AST011 gate is now MEMBERS-aware, so a provable
+#     archive .extractall selected through a UNION callee fires too — the old _func_attr returned None
+#     for an IfExp / Subscript callee, so these read GREEN (workflow re-sweep false-negatives). ---
+
+def unpack_methodref_ifexp(path):
+    # the archive .extractall is hidden in an IfExp arm — `(tarfile.open(p).extractall if c else f)(d)`;
+    # a callee union member is a provable-archive method-ref -> AST011 (/srv/victim24).
+    import math
+    (tarfile.open(path).extractall if path else math.sin)("/srv/victim24")
+
+
+def unpack_methodref_subscript(path):
+    # the archive .extractall is selected by a literal-seq subscript — `[t.extractall][0](d)`;
+    # the members-aware gate sees the archive method-ref at index 0 -> AST011 (/srv/victim25).
+    [tarfile.open(path).extractall][0]("/srv/victim25")

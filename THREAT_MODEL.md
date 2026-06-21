@@ -196,10 +196,19 @@ captured builtin is not poisoned; **`import … as` / `from … import … as`**
 all four timelines (a prior local binding no longer masks a later import); and a **walrus call target**
 (`(run := os.system)(…)`) resolves the walrus value as the callee.
 The FINITE form space (binding forms incl. except/match/import-as, keyword args, alias/getattr/walrus
-canonicalization) is thus closed and fixture-guarded; what remains open is the **mixed-list residual**
-(`for f in [benign, os.system]` binds
-the loop var to the first module-qualified element, so a dangerous element after a dangerous-looking
-benign one can be missed), **cross-scope `nonlocal`** writes propagated up to an enclosing scope,
+canonicalization, AND — v1.11.1 round 11 — **SET-valued unions**) is thus closed and fixture-guarded. A
+callee that denotes a SET of possible callables (an `IfExp` arm, a literal-sequence element, a bound
+name, a method-ref through them) is now resolved as that set: `_VF.members` holds the union and `_VF.seq`
+is POSITIONAL, so the dispatch enumerates every member (a benign arm can NOT hide a dangerous one — the
+`(math.sin if c else os.system)(cmd)` / self-file `open` / archive `.extractall` hidden-in-a-union FNs are
+closed), a literal subscript HONORS its constant index (incl. negative — `(a, b)[1]` ≡ element `b`, even
+through a Name-bound sequence), a dynamic index is CONSERVATIVE (fires if ANY element is dangerous — a
+possible FP, never an FN), and a cross-rule union fires EVERY member's rule (`(os.system if c else
+pickle.loads)(x)` → both AST003 and AST004), order-independent (the join is commutative / associative /
+idempotent). What remains open here is a **comprehension loop-variable** (its own scope, not modeled — so
+`[g for g in (os.system,)][0]()` reads GREEN) and a **dict/set-literal subscript callee** (`{0: os.system}
+[0]()` — only list/tuple carry a positional seq), both the obfuscation tail; plus **cross-scope `nonlocal`**
+writes propagated up to an enclosing scope,
 **return-value modeling** (`importlib.import_module("os").system`, `functools.partial(os.system)`),
 two **capture-mask edges** (a use INSIDE an `except`/`case` block AFTER an in-body reassignment of the
 captured name to a dangerous value but BEFORE leaving the block — contrived, no evasion incentive since

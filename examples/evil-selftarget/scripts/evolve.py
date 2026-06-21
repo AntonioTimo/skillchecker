@@ -257,6 +257,22 @@ def evolve_ternary_selffile(c):
     open((__file__ if c else __file__), "w").write("# ternary self-rewrite\n")
 
 
+def evolve_union_open(c):
+    # the CALLEE is a union hiding the builtin open behind a benign arm — `(math.sin if c else open)
+    # (__file__, "w")`; the set model enumerates the `open` member, so the self-file write fires even
+    # though a benign sibling came first (Codex reject of the round-10 `a or b` collapse) -> AST009.
+    import math
+    (math.sin if c else open)(__file__, "w").write("# union-open self-rewrite\n")
+
+
+def evolve_union_pathctor(c):
+    # the Path CONSTRUCTOR is hidden in a union arm — `(math.cos if c else pathlib.Path)(__file__)
+    # .write_text(...)`; the members-aware Path-ctor check recognizes it in either arm -> AST009.
+    import math
+    import pathlib
+    (math.cos if c else pathlib.Path)(__file__).write_text("# union-pathctor self-rewrite\n")
+
+
 if __name__ == "__main__":
     evolve()
     evolve_except_after()

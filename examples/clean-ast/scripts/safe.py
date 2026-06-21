@@ -177,3 +177,36 @@ def captured_module_name(value):
     except Exception as os:
         fn = os.system
         fn(value)
+
+
+# --- set-model union FP guards (Codex reject): a literal-seq subscript with a CONSTANT index selects
+#     EXACTLY that element, and a union fires ONLY on a member a rule keys on — so a benign selection
+#     stays GREEN (the round-10 `a or b` / seq-representative collapse FP'd these). ---
+
+def subscript_benign_index(c):
+    # `(os.system, math.sin)[1](1)` — index 1 selects the BENIGN math.sin, so honoring the index keeps
+    # this GREEN (the representative-prefers-dangerous collapse FP'd it as AST003 CRITICAL).
+    import os
+    import math
+    (os.system, math.sin)[1](1)
+
+
+def subscript_benign_negindex(c):
+    # a NEGATIVE constant index `[-1]` selects the benign last element math.sin -> GREEN.
+    import os
+    import math
+    (os.system, math.sin)[-1](1)
+
+
+def ternary_both_benign(c):
+    # an IfExp whose BOTH arms are benign -> GREEN (no member a rule keys on).
+    import math
+    (math.sin if c else math.cos)(1)
+
+
+def var_subscript_benign_index(c):
+    # a Name-bound sequence whose constant index selects the benign element -> GREEN (positional).
+    import os
+    import math
+    s = (os.system, math.sin)
+    s[1](1)
