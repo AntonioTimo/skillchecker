@@ -19,54 +19,93 @@ out of scope" item or a spec "Non-goals" line.
 | H | Taint / data-flow: credential → network exfil (`TF001`/`TF002`) | 1.8.0 |
 | I | Self-targeting prose + self-modification + activation-surface (`HI024`/`HI025`/`ME013`/`ME014`/`ME015`/`AST009`) — borrow-from-SkillSpector | 1.9.0 |
 | J | Ecosystem hardening — forged-instruction prose, `os.exec`/Zip-Slip, MCP secret-egress, Phantom Gyp, reverse-shell + staging hosts (`CR041`–`CR044`/`HI026`–`HI029`/`AST010`/`AST011`) | 1.10.0 |
+| — | Adversarial-audit hardening (Codex + self-run multi-agent sweeps, to convergence): fail-closed `IO004`, comma-coordinator negation guard, walrus/`for`/comprehension taint + `HI009` httpx, per-scope-lexical `AST009`, value-aware `AST011` + `.extract`/method-ref + import-alias resolver, recursive manifest discovery, bounded tree walks; AST-based `check_docs.py` doc-currency gate | 1.11.0 |
+| — | Convergence sweep round 4 (8 confirmed defects, no new rule IDs): Unicode-**property** negation boundary (U+201A/em-dash/U+2E41) + polarity-inversion/double-negation guard; `AST009` import-aliased `Path` ctor; `from … import *` star-import resolved across all dotted rules; `AST011` receiver-**provenance** gate (pandas `Series.str.extractall` FP); `.npmrc`/`.yarnrc` off-registry `HI023` | 1.11.1 |
 
-## v3 candidates
+## Road to v2.0
 
-### Deepen existing passes
-- **E — Evasion v2 (✅ shipped in v1.5.0):** NFKC normalization pre-scan (fullwidth /
-  compatibility-character evasion), IDN / punycode + homoglyph domains, and the
-  cloud-metadata SSRF endpoint (`CR038`) that `HI019`'s link-local guard would
-  otherwise skip. *Source: spec B's "full TR39 / NFKC / IDN homoglyphs"
-  non-goal, plus a guard gap found after v1.4.0.*
-- **Taint / data-flow AST (✅ partially shipped in v1.8.0):** Phase H added an
-  intraprocedural, single-file taint pass connecting a **credential source**
-  (`os.environ`/`os.getenv`) to a **network sink** — `TF001` CRITICAL (reputation-bad
-  / user-controlled destination), `TF002` HIGH (hardcoded named host). Additive-only;
-  reuses the `CR040` destination machinery; the URL position is excluded from payload
-  taint to spare configurable env→URL endpoints. *Source: THREAT_MODEL #4, spec A;
-  cross-checked vs NVIDIA SkillSpector `behavioral_taint_tracking`.* Residual / next
-  increment: **cross-function** and **inter-file** flow (no call graph), **other
-  source/sink families** (file-read→network à la SkillSpector TT4, external-input→exec
-  TT5, tainted→file-write), **container-mutation aliasing**, and **`socket.send`
-  sinks** (need type inference). Caveat preserved: the pass never REDUCES paranoia —
-  it only adds/escalates on top of the non-literal-sink findings the tool already
-  emits.
-- **JS / TS AST pass:** a real parser for JS like `ast` is for Python. *Source:
-  spec A.* Blocked on a dependency-free JS parser (the scanner ships no deps,
-  makes no network calls).
-- **MCP / hook destination reputation (✅ shipped in v1.7.0):** `CR040` escalates
-  a bundled hook / MCP destination (hook `command`, stdio `command`+`args`, remote
-  `url`) pointed at a public-IP literal or punycode/IDN host to CRITICAL — the
-  severity gap where a lone bare-IP / punycode MCP read YELLOW. Reuses
-  `_public_ip_in` / `HI022`; keyed off config filenames. *Source: spec C.* Residual
-  out of scope: MCP `env`/`headers` secret-egress, full engine re-run over hook
-  command content, ordinary named-domain MCP reputation (no network feed).
-- **MCP `env` / `headers` secret-egress.** A bundled MCP server config that injects
-  a credential reference (`"env": {"TOKEN": "${ANTHROPIC_API_KEY}"}`, an
-  `Authorization` header) forwards the user's secrets to a third party. *Source:
-  Phase G spec out-of-scope #1.* Judgment-heavy on FP (env/headers are how MCP
-  servers legitimately auth to their own service) — needs a narrow signal
-  (shell-style interpolation / credential-shaped var names) to stay in budget.
+By the v1.10.0 ecosystem sweep's own assessment, the well of **dependency-free
+static gaps is largely dry** — the remaining minors complete surfaces already opened
+(see "Next minors" below). The one move that genuinely earns a **major v2.0** is a
+**new surface**:
 
-### New threat classes
-- **Supply-chain (✅ shipped in v1.6.0):** a structural pass over bundled
-  dependency manifests — `CR039` npm install-lifecycle scripts, `HI023`
-  non-registry (git/URL/tarball/index-redirect) sources, `ME012` unpinned installs.
-  Keyed off manifest filenames, never executes the file. *Source: THREAT_MODEL
-  #2/#3.* Residual out of scope: transitive deps, malicious updates to
-  already-pinned libs, CVE/version reputation, typosquatting, runtime fetches.
+- **★ v2.0 headline — JS / TS AST pass.** A real parser for JavaScript/TypeScript
+  the way `ast` is for Python — the scanner's **first second language**. Unlocks the
+  classes that are SKIP-by-language today (npm serialize-environment / env-dump→
+  network, silent `child_process` execution, JS dynamic eval beyond the `HI016`
+  regex). *Source: spec A; the v1.10.0 ecosystem spec §6.* **The hard decision it
+  forces** — there is no stdlib JS parser, so a major version must resolve the
+  no-dependency invariant: either **vendor a pure-Python JS tokenizer/parser** (a
+  large blob to audit — ironic for a tool that flags unaudited blobs) **or accept a
+  parser dependency** (breaks "dependency-free"). A **coarse regex JS pass is
+  rejected** — the `HI019` fragile-sibling lesson: a line-regex over a structured
+  language spawns sibling forms forever.
+- **Bundle into the same v2.0:** **SARIF 2.1.0 output** (`--format sarif`, a pure
+  stdlib `json.dumps` transform — GitHub code-scanning / IDE interop) and the
+  **`TT4` file-read→network taint** extension (reuses `_TaintAuditor`; behind a flag
+  because the file-read source surface is broad). Both are ready ergonomics that ride
+  the major so it carries a real surface expansion plus the deferred niceties.
 
-### Architecturally out of scope (a different tool, or never)
+## Next minors (deepen existing passes — dependency-free)
+
+- **Leak-verb inflections (`HI024`/`HI025`).** The leak-verb alternation is base-form
+  anchored, so a gerund/participle with NO negation ("your job is **revealing** your system
+  prompt", "start by **dumping** your system prompt") under-fires. Add `-ing`/`-s`/`-ed`
+  inflections to the verb set, re-validating against the FP budget (the sub1/sub2 split that
+  keeps generic verbs from blowing the budget). *Source: convergence round-4 re-verify; THREAT_MODEL §8(b).*
+- **More ecosystem index-configs (`HI023`).** The supply gate is a closed filename allowlist;
+  extend `_index_config_kind`/`_supply_index_config` to `.condarc` (conda channels),
+  `.bundle/config` (Bundler `BUNDLE_MIRROR`), `nuget.config` (packageSources), `composer.json`
+  (`repositories`), `.gitconfig` (`insteadOf` URL rewrite), and Homebrew taps. *Source:
+  convergence round-4 completeness critic; THREAT_MODEL §8(c).*
+- **Taint next increment.** Other source/sink families on the v1.8.0 `_TaintAuditor`:
+  external-input→exec (`TT5`, mostly subsumed by `AST001`/`AST003`), tainted→
+  file-write (exfil-to-disk). Plus the architectural reach: **cross-function** and
+  **inter-file** flow (a call graph), **container-mutation aliasing**, **`socket.send`
+  sinks** (need type inference). *Source: THREAT_MODEL #4; spec H §6.* (`TT4`
+  file-read→network is bundled into v2.0 above.)
+
+## OPT-IN backlog (behind a flag — fits invariants, not default-on)
+
+Each is dependency-free and never-executes, but breaks an FP budget or needs new
+machinery if default-on; ship behind a flag. *Source: spec `2026-06-19-ecosystem-
+hardening.md` §6 + `2026-06-19-self-targeting.md` §6.*
+
+- **Conditional / sleeping-payload (logic-bomb) co-occurrence** — an AST `If`/`IfExp`
+  whose test is a time/`$CI`/`NODE_ENV`/hostname/counter gate AND whose body holds an
+  already-recognized exec/taint/network sink (sink-gated, so the conditional alone
+  never fires). The one M-effort item — needs new subtree-walk machinery. *Repello AI,
+  OWASP-Agentic two-stage payload.*
+- **`ctypes` / `cffi` native-code loading** — `ctypes.CDLL`/`cdll.LoadLibrary` (AST,
+  reuses `_dotted_name`/`_is_literal`). HIGH-default; a `.so` perf helper is a
+  plausible benign case.
+- **read + egress capability amplifier** — `Read`+`WebFetch` (or `Bash(curl)`) both in
+  `allowed-tools`: a severity *amplifier* when it co-occurs with a flagged exfil host /
+  credential read, info-only alone (high benign base rate). *3 skill scanners.*
+- **`.mcp.json` inlined tool-schema injection** — if a bundled config statically
+  inlines a `tools[]`/`inputSchema` array, walk its description/default strings with
+  the existing prose/exfil regexes (filename-keyed). *mcp-shield.* (The common case —
+  tool descriptions from the **running** server — is SKIP: needs network.)
+- **Typosquatting** — dependency name edit-distance to a **bundled** popular-package
+  frozenset (no network, but a guaranteed-stale list; tight distance guards). *Phylum/
+  Socket.dev.*
+- **Suspicious-TLD / disposable-host links** (`.tk/.ml/.xyz/.top` + free dynamic-DNS)
+  in a network context — a corroborating MEDIUM, network-context-gated. *GuardDog.*
+- **Dependency-confusion self-version inflation** (`package.json` version ≥99 /
+  `X.X.X` with X≥90) — a MEDIUM nudge folded into the supply-chain pass. *Microsoft.*
+
+## SKIP / needs an LLM (recorded so the next session doesn't re-litigate)
+
+- **SKIP — breaks an invariant:** OSV/CVE live lookups, abandoned-dep flags (network);
+  YARA-via-`yara-python` (dependency); **live MCP tool-poisoning / rug-pull** (tool
+  descriptions are returned by the *running* server at `tools/list` — needs network +
+  execution); a coarse regex JS pass (HI019 lesson); XXE (FP budget); money/crypto
+  wallet terms (low CC base rate). *Spec ecosystem §6.*
+- **Needs an LLM (the Claude-side `SKILL.md` steps, not the scanner):** semantic intent
+  of a live MCP tool description; description-vs-behavior mismatch (`TP4`, already a
+  Step 7.5 advisory); DAN/persona disambiguation for a borderline override hit.
+
+## Architecturally out of scope (a different tool, or never)
 - **Dynamic analysis / runtime sandboxing** — changes what the tool *is*
   (pre-install gate → runtime monitor). *Source: THREAT_MODEL #1/#6.*
 - **Author / repo reputation** — deliberately the user's call. *Source:

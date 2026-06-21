@@ -32,7 +32,31 @@ def summarize(rows):
     return {"rows": len(rows), "total": total}
 
 
+def walrus_local():
+    # a walrus binding of a credential that stays LOCAL (printed, no sink) — the
+    # NamedExpr handling must propagate taint, but with no sink there is no flow,
+    # so still no TF finding (proves the binding handler doesn't over-fire)
+    if (tok := os.environ["MY_API_KEY"]):
+        print(len(tok))
+
+
+def for_target_local():
+    # for-target over a credential iterable, but used only locally -> no flow
+    for v in os.environ.values():
+        print(len(v))
+
+
+def comprehension_local():
+    # a comprehension binds a credential element but uses it only LOCALLY (no network
+    # sink) -> the comprehension-scope taint handling must not over-fire when there is
+    # no sink (mirrors walrus_local / for_target_local)
+    return [len(v) for v in os.environ.values()]
+
+
 if __name__ == "__main__":
     show_home()
     build_auth_header()
     summarize([[1, 2], [3]])
+    walrus_local()
+    for_target_local()
+    comprehension_local()

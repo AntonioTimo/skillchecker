@@ -9,5 +9,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3fb1c873e1b9b056a4dc4c0c198b24c3ffa059243875552b2bd0933b1aee4ce2"
 
 [[package]]
+name = "tokio"
+version = "1.36.0"
+# The OFFICIAL crates.io index as a BARE url (no registry+ prefix) — the canonical Cargo
+# source; must stay GREEN (round-4 audit: it used to FP as off-registry).
+source = "https://github.com/rust-lang/crates.io-index"
+checksum = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+[[package]]
 name = "demo"
 version = "0.1.0"

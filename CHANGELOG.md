@@ -4,6 +4,463 @@ All notable changes to skill-checker.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.11.1] — 2026-06-20
+
+**Convergence sweep — round 4 (two adversarial passes).** Self-run multi-agent adversarial
+sweeps against the v1.11.0 scanner, then a re-verification pass that attacked every round-4
+fix in turn, surfaced **20+ confirmed defects** (mostly false-**NEGATIVE** bypasses, plus
+false-**POSITIVE**s). Each was reproduced against the live scanner *before* fixing
+(RED→GREEN), fixed at the **disease class** rather than the reported instance, and locked
+with a permanent fixture vector + a CI snippet assert. No new rule IDs — every fix hardens
+an existing rule.
+
+### Fixed — round-6: uniform binding-form coverage + sink-arm completeness (two more sweeps)
+
+Two further adversarial sweeps (a finder pass + a confirmation pass that attacked the finder's
+own fixes) found **17 bounded resolver gaps**, then **3 regressions/FPs the fixes themselves
+introduced** — all reproduced against the live scanner, fixed at the disease class, locked with
+fixtures + CI. Still no new rule IDs.
+
+- **The four per-scope value-timelines now cover Python's binding forms in LOCK-STEP.** The
+  round-4 flow-sensitivity work left the four timelines (callable-alias / `__file__` /
+  method-ref / archive-provenance) with *checkered* form coverage, so a name rebound by a form
+  one timeline forgot kept a stale binding: an `AnnAssign`-bound archive read GREEN (`arch:
+  object = tarfile.open(p); arch.extractall()` — AST011 FN), a `with … as` rebind did not reset
+  a callable alias (AST003 FP), a **tuple-unpack** alias was dropped (`runner, opts = os.system,
+  {}` — AST003 FN), and an archive name rebound by a top-level `for`/`AnnAssign`/`AugAssign` kept
+  firing (AST011 FPs). All four now handle the same set — `Assign` (recursive matched-length
+  tuple/list pairing), walrus, `AnnAssign` (a value (re)binds; a **bare** annotation is a no-op
+  that PRESERVES the prior binding), `AugAssign` (reset), `for`-target (reset, or seq-resolve),
+  `with … as` (reset) — keyed off one documented invariant so a future form stays in sync.
+- **`for f in [os.system]: f(cmd)`** (and `for ex in [t.extractall]: ex()`) now resolve the
+  loop variable through a literal sequence to the dangerous callable / archive method-ref,
+  mirroring the existing archive `seqarch` path → AST003 / AST011. An opaque iterable still
+  resets the loop variable (the benign-reuse guard is preserved).
+- **Inline `getattr(os,"system")(…)`** now dispatches like `os.system(…)` across every dotted
+  rule AND the archive-opener gate (one `_func_canon` reconstructs `<base>.<literal>` from a
+  getattr call used as a call's func) — only the *assigned* `fn = getattr(...)` form fired before.
+- **New AST009 self-rewrite sink FORMS:** `os.truncate(__file__, …)` (in-place destroy),
+  `fileinput.input/FileInput(__file__, inplace=…)` (stdlib in-place edit), and
+  `os.symlink/os.link(src, __file__)` incl. the `dst=` keyword form (relink the running file).
+  `Path(__file__).rename/.replace(dst)` is deliberately **NOT** flagged — like the already-GREEN
+  `os.rename(__file__, dst)`, `__file__` there is the SOURCE moved away (a backup/relocation),
+  not the inject TARGET; AST009 is scoped to CONTENT rewrite.
+- **`os.startfile` reverted out of the os.exec family (AST010).** It is the Windows
+  "open with the associated default app" call (double-click / xdg-open equivalent), a benign
+  document-open idiom — classifying it as process-image replacement false-fired on
+  `os.startfile("report.pdf")`.
+
+The confirmation sweep also reconfirmed the documented **dataflow boundary** (left unfixed, by
+design — they need a reaching-definitions / value-flow / interprocedural engine the heuristic is
+not, with the Claude-side review as the backstop): conditional-control-flow masking
+(`if False: system=safe; system(cmd)` — the *symmetric* dangerous `if c: runner=os.system;
+runner(cmd)` correctly fires), mid-file re-import, cross-scope `nonlocal` writes, and
+`importlib.import_module()` / `functools.partial` return-value modeling.
+
+### Fixed — round-7: the last finite binding / keyword / getattr forms
+
+A seventh sweep found three more bounded form gaps — all reproduced against the live scanner,
+finishing the FINITE part of the form space (after these, the residual is the documented INFINITE
+boundary: dynamic dispatch / NL prose / cross-function dataflow, with the Claude-side review as the
+backstop). Still no new rule IDs.
+
+- **`def NAME` / `class NAME` is a binding form** — it rebinds NAME in the enclosing scope, the
+  one form missing from the lock-step set. `runner = os.system; def runner(): …; runner(c)` read
+  RED (AST003 FP — the alias leaked because the def node was skipped wholesale), same for an
+  archive name shadowed by a later `def`. All four timelines now record a `def`/`class` name as a
+  reset before skipping its (nested-scope) body; a `lambda` binds no name.
+- **Inline `getattr` is now robust.** `builtins.getattr(os,"system")(c)` (qualified head) and
+  `getattr(pathlib,"Path")(__file__).write_text()` (a getattr→Path constructor → AST009) were
+  missed; a **locally-shadowed** `def f(getattr): getattr(os,"system")(c)` false-fired AST003. One
+  `_func_canon` now dispatches inline getattr ONLY when the head resolves to the **builtin** getattr
+  (a shadowed `getattr` param is inert), resolves the base **recursively**, and feeds the Path-ctor
+  / archive-opener gates too.
+- **The AST009 file-sink arms read the file argument keyword-aware.** `open(file=__file__,
+  mode="w")`, `io.open(file=__file__, …)`, `os.open(path=__file__, flags=os.O_WRONLY)`,
+  `os.truncate(path=__file__)`, and `fileinput.input(files=__file__, inplace=True)` are valid Python
+  the positional-only check read GREEN; each now resolves the file arg via `_arg_or_kw` (the
+  dest-arm already did `dst=`). Read-mode keyword forms (`open(file=__file__)`) stay GREEN.
+- **Confirmation sweep — the def/class reset must hold CROSS-scope.** The round-7 def-reset
+  updated the per-scope timelines, but `_canon` for a call in a NESTED scope fell through to the
+  flow-insensitive global alias map, which still held `runner → os.system` (and had no def/class
+  reset) — so a benign dispatch module (`runner = os.system; def runner(c): …; def main():
+  runner(…)`) read AST003, escalating to CRITICAL/RED with a non-literal arg. A name bound by a
+  `def`/`class` is now dropped from that global map (it is a function/class, not a callable
+  alias), so the per-scope reset is authoritative everywhere; the genuine cross-scope global-rebind
+  (`x=None; … global x; x=os.system; x(c)`) and `def`-then-`x=os.system` still fire.
+
+### Fixed — round-13: nested-union dedup key (Codex reject 3)
+
+Codex found the one remaining hole in the set model's commutativity: `_vf_dedup_key` (which `_vf_join`
+uses to deduplicate union members) recursed into a `_VF`'s positional `seq` elements but NOT into a nested
+union's `members`. A `seq` element can itself be a union (`((x if a else y),)`), and two DIFFERENT inner
+unions both summarize to `canon=None`, so their keys collided and `_vf_join` dropped one — so
+`((math.sin if a else os.system),) if b else ((math.cos if c else pickle.loads),)` indexed `[0]` fired only
+the first arm's rule, and swapping the arms changed the result (`AST003` ↔ `AST004`, non-commutative). The
+key now includes the nested `members` as an order-independent FROZENSET, so a union-in-a-sequence retains
+every member and arm/grouping order is immaterial (commutativity / associativity hold for nested unions
+too). One-line change; golden byte-identical on the existing 23 fixtures; no new rule IDs.
+
+### Fixed — round-12: set-model CLOSURE under expression constructors (Codex reject 2 + re-sweep)
+
+Codex rejected round-11 again: the SET model was correct at the top level but NOT CLOSED under expression
+CONSTRUCTORS — a union was lost the moment an Attribute / getattr / Subscript was applied on top, because
+`_facts_of` / `eval_expr` read the SUMMARY of the base/value (`base.canon`, `v.seq`) instead of mapping
+over the members. So `(math if c else os).system(cmd)` read GREEN (the Attribute saw the summary canon
+None), a Subscript over a union of DIFFERENT-length sequences hid the dangerous element (the summary `seq`
+is None when lengths disagree), and `_self_target` did not consult the unified resolver for a subscript
+(`open((__file__, "safe")[0], "w")` read GREEN / a generic ME005).
+
+The fix makes every constructor a HOMOMORPHISM over the union — it distributes over `_vf_members` then
+joins: `_vf_attr` lifts attribute/getattr access (`(math if c else os).system` → the union {math.system,
+os.system}); `_subscript_union` indexes each member's positional seq (a constant index per member, an
+out-of-a-member's-range constant being that member's dead path); the Path constructor preserves self-file
+provenance (`Path((__file__, x)[0]).write_text()`); and `_self_target` reads the final `self_file` fact
+via `_facts_of`. An adversarial re-sweep then surfaced three more closure breaks, each fixed: (FN2, broad)
+`_is_own_file_target` recursed an IfExp with OR and, as a top short-circuit, collapsed the WHOLE ternary to
+self-file whenever EITHER arm was `__file__` — discarding the other arm — so `(os.system if c else
+__file__)(cmd)` / `(tarfile.open(p) if c else __file__).extractall()` read GREEN; self-file now lifts
+through the IfExp JOIN like every other domain. (FN3) the for-target bound the loop var from the scalar
+summary `it.seq`, so a union of differing-length iterables lost a member; it now unions every element
+across `_vf_members`. (FN1) a comprehension was modeled as a fixed length-1 representative, so a constant
+index ≥ 1 was wrongly a dead path; a new `seq_open` flag marks an UNBOUNDED-length sequence (a
+comprehension) whose subscript at ANY index yields the representative. Golden byte-identical on the existing
+23 fixtures; no new rule IDs. The closure was validated by a constructor-closure matrix (Attribute /
+getattr / Subscript / Path-ctor / IfExp-with-`__file__`-arm / for-target / comprehension over a union,
+nested and across all four domains, plus a self-file regression battery). Remaining OOS unchanged
+(value-flow / interproc; comprehension loop-variable scope; dict/set-literal subscript callee).
+
+### Fixed — round-11: SET-valued union resolution (Codex reject of the round-10 `a or b` collapse)
+
+Codex rejected the round-10 union handling: a callee that denotes a SET of possible callables — an
+`IfExp` arm, a literal-sequence element, a bound name, a method-ref through them — was collapsed to a
+single first-truthy / danger-preferred representative, so a **benign arm could hide a dangerous one**
+(`(math.sin if c else os.system)(cmd)` read GREEN), a literal subscript **ignored its index** (both an
+FN `(math.sin, os.system)[1]` and an FP `(os.system, math.sin)[1]`), and findings depended on arm ORDER
+(not commutative). An adversarial re-sweep confirmed the class plus eleven siblings (self-file `open`/
+`os.open`/`Path` ctor and archive `.extractall` hidden behind a benign union arm — the danger set was
+incomplete AND a single canon can't carry a union).
+
+The fix makes `_VF` REPRESENT THE SET: `members` (the union alternatives) + a POSITIONAL `seq` (tuple
+of element facts, so `(a, b)[1]` selects exactly `b`). A single commutative / associative / idempotent
+`_vf_join` builds unions; a unified visit-time `_facts_of` resolves any callee to its member set and the
+dispatch enumerates them (firing every member's rule, deduplicated by rule_id) — so a benign member
+never hides a dangerous one, a constant index (incl. negative) is honored positionally, a dynamic index
+is conservative (fire if ANY element is dangerous), and a cross-rule union fires BOTH rules
+(`(os.system if c else pickle.loads)(x)` → AST003 **and** AST004), order-independent. The five old
+per-domain visit-time resolvers (`_func_canon` / `_func_attr` / `_method_ref_at` / `_name_archive_state`
+/ `_is_archive_expr` / `_extractall_on_archive`) and the round-10 `_danger_pref` / `_canon_is_dangerous`
+collapse helpers became dead and were DELETED — `_facts_of` + the build-time `eval_expr` are now the sole
+binding/resolution source. Golden byte-identical on all 23 fixtures (the union changes are additive on
+new forms); no new rule IDs. Remaining OOS (documented, value-flow / obfuscation tail): a closure
+free-variable / `global`-rebind resolved at call time, a comprehension loop-variable (its own scope), and
+a dict/set-literal subscript callee (not positional).
+
+### Refactor — round-9: unified ValueFacts evaluator (single binding/resolution source)
+
+The four per-scope timeline walkers (callable-alias / `__file__` / archive / method-ref) that the
+H1–H7 sibling-bug cycle kept re-diverging were collapsed into ONE abstract interpreter over a single
+value-facts type (`_VF`): one `eval_expr` / `bind_target` builds `{name: [(pos, _VF, cond)]}`, and
+every resolver (`_canon` / `_self_target` / `_name_archive_state` / `_method_ref_at`) reads it. Done
+incrementally (build parallel → differential against the old resolvers → switch domain-by-domain →
+delete the old walkers), each step a commit gated by a golden-output baseline (`scripts/diff_baseline.py`).
+The unified evaluator reached **zero differential divergence** across the whole corpus and the cutover is
+byte-identical to the golden baseline — empirical equivalence on the (finite) corpus, not a formal proof.
+Net ≈ −560 lines. A new binding-form × provenance × shadow/rebind/transitive/capture/walrus/cond
+combination is now handled in ONE place, so the H1–H7 family is constructively unreachable. No rule IDs.
+
+### Fixed — round-10: form-coverage hardening (pre-existing FNs surfaced by the round-9 sweep)
+
+An adversarial sweep against the unified evaluator (162 constructions → 16 confirmed defects) was each
+reproduced against BOTH the old (pre-cutover) and new scanner: **all 16 produced identical verdicts — zero
+round-9 regressions; all pre-existing** (in the old code too, just never in the corpus). Ten finite-form
+classes were then fixed in the one evaluator (golden no-drift at each): recursive (not one-shot) NamedExpr
+unwrap in the archive provenance gate (`(a:=(b:=tarfile.open())).extractall()`); inline IfExp and
+literal-sequence subscript as a CALLEE (`(os.system if c else os.popen)(cmd)`, `(os.system,)[0](cmd)`);
+IfExp facts OR-combined across arms (a name bound to a ternary of two callables); inline IfExp self-file
+argument (`open((__file__ if c else __file__), 'w')`); and an archive-precedence fix so a scalar→sequence-
+of-archives rebind supersedes the scalar (`a=tarfile.open(); a=[tarfile.open()]; a[0].extractall()` fires,
+`a.extractall()` on the list stays GREEN). Four remain an **OOS value-flow / interprocedural boundary**
+(documented): a closure free-variable resolved at call time (across three domains), and a `global`-rebind
+visible at a module-level call after a nested mutation. No new rule IDs.
+
+### Fixed — round-8: except/match capture masking (overlay) + import-as + walrus-call-target
+
+A fresh multi-agent adversarial sweep (**119 constructions, 19 confirmed false-NEGATIVEs**)
+attacked the round-4..7 scanner and the two findings of an external Codex pass; every defect was
+reproduced against the live scanner before fixing. The first masking attempt (mask+restore into
+the timelines) was then **re-swept against itself**, which caught the three regressions it
+introduced — so it was re-rooted on a cleaner overlay model. A second re-sweep against the
+overlay found one more fixable corner (a walrus in the getattr head) and confirmed two **documented
+OOS boundaries** (a nested-`def` closure over a captured name — a contrived FP; and conditional-
+control-flow masking — a pre-existing value-flow FN, reproduced on a plain `if`). A further external
+Codex pass found three more, all reproduced and fixed: a walrus getattr head in the ASSIGNMENT-result
+and method-ref paths (`wfn = (g := getattr)(os,"system")` — not just the inline call); the capture
+overlay not consulted while the alias timeline is BUILT (so `except E as getattr: fn = getattr(os,
+"system")` false-aliased fn → AST003 FP); and a RELATIVE import (`from .os import system as run`)
+canonicalized to the stdlib `os.system` (AST003 FP). Further Codex passes and focused divergence checks
+hardened the alias-timeline builder (`resolve()`) to match `_canon` at the disease class — it is a hand-
+rolled per-scope copy that runs BEFORE `self.scopes` exists, so it kept lagging: a captured DOTTED head
+(`except E as builtins`), a capture superseded by an in-body rebind, a NESTED walrus head, a PARAM-shadowed
+getattr in the assignment path (all param kinds), and a bare MODULE-ALIAS getattr base (`import os as o; getattr(o,"system")`)
+were each closed by three root fixes — seeding params into the alias builder, distinguishing a within-scope
+bind (shadow → mask) from UNBOUND (→ import) in the general resolve path, and resolving a bare module alias
+in `_resolve_import`. No new rule IDs — every change hardens AST003 / AST009 / AST011.
+
+- **`except … as name` and `match`/case captures now MASK the name inside the block.** A name
+  previously bound to a dangerous callable / `__file__` / archive / method-ref is, inside an
+  `except E as name:` handler or a `case [name]:` / `case {"k": name}:` / `case C() as name:`
+  body, the caught exception / matched sub-value — not the prior binding. The first
+  implementation wrote a mask+restore pair into the four per-scope timelines and was **net-
+  negative**: restoring a captured *builtin* name (`except … as getattr`) injected a phantom
+  local binding that made `_local_binding_scope` treat the builtin as shadowed for the rest of
+  the scope (a broad FN), a name captured by two `case`s resolved its prior to the first mask
+  (FN), and the restore clobbered an in-body rebind (FN). The fix is a **block-scoped overlay**:
+  a separate per-scope region map (`_scope_captures` / `_capture_masked`) the resolvers consult,
+  leaving the timelines untouched — so a use **after** the block (or after an in-body rebind)
+  still resolves normally (no FN on the fall-through path, where Python keeps the prior binding),
+  and an otherwise-unbound captured builtin is never poisoned. The masking yields to a real
+  in-body rebind recorded in the alias timeline.
+- **`import … as` / `from … import … as` is now a binding form in the per-scope timelines.** A
+  local `import os as run` / `from os import system as run` REBINDS the name, so a prior
+  `run = print` no longer masks the later import (`run.system(cmd)` / `run(cmd)` now resolve to
+  os.system — AST003), `import os as mod; mod.replace(src, __file__)` fires AST009, and
+  `import tarfile as t; t.open(p).extractall()` fires AST011. An import that rebinds a name also
+  resets its `__file__` / archive / method-ref provenance.
+- **Walrus is transparent to dotted-name resolution.** `(run := os.system)("id")`, a walrus in the
+  getattr HEAD `(g := getattr)(os, "system")(cmd)`, and — after a further re-sweep — a walrus as the
+  RHS value / attribute base / getattr base (`fn = (x := os.system)`, `fn = (m := os).system`, `fn =
+  getattr((m := os), "system")`, `P = getattr((m := pathlib), "Path")(__file__)`) all resolve to the
+  walrus VALUE. The root fix is one place: `_dotted_name` now unwraps a `NamedExpr` ANYWHERE in the
+  Name/Attribute chain, so every resolver (alias builder, `_func_canon`, `_canon`, the Path-ctor and
+  archive gates) sees the un-walrus'd form — closing the one-liner AST003 / AST009 / AST011 bypass.
+- **F2 — getattr canonicalization unified across the resolvers (external Codex pass).** The
+  assignment-result path (`f = builtins.getattr(os, "system"); f(cmd)`) and the method-ref path
+  (`ex = builtins.getattr(t, "extractall")`) recognized only a LITERAL `getattr(...)` — missing
+  `builtins.getattr` and an aliased getattr (the inline form via `_func_canon` already handled
+  them) and not shadow-safe. Both now resolve the getattr head shadow-awarely and the base
+  recursively, mirroring `_func_canon`: the assigned/aliased `builtins.getattr` indirection fires
+  (AST003 / AST011) while a locally-shadowed `getattr = custom; f = getattr(os,"system")` stays
+  GREEN.
+
+### Fixed — prose negation guard (gaps 1–3, 8)
+- **The clause-boundary test is Unicode-PROPERTY-based, not an enumerated codepoint
+  denylist.** The narrow guard asked "is there a clause boundary between the negation and the
+  dangerous verb?" with a literal class `[,.;:!?،、。]`; three comma/dash confusables slipped
+  it and read a CRITICAL injection GREEN — `U+201A` SINGLE LOW-9 QUOTATION MARK (a comma
+  look-alike NFKC does not fold, whose name lacks "COMMA"), the en-/em-dash family, and
+  `U+2E41` REVERSED COMMA. A boundary is now any clause-delimiting punctuation decided by
+  Unicode **category + name** (every script's comma/full-stop/… via a `Po`-name test,
+  separator dashes via `Pd`, the two low-9 quote comma look-alikes), so a new confusable can
+  no longer be hand-enumerated past it. The re-verification passes then showed each
+  *narrower* refinement was still a denylist — a NAME-based clause-word list missed non-Latin
+  terminators (Devanagari danda `।`, Tibetan shad, Khmer khan, Hebrew sof pasuq, Myanmar
+  section), and a `Po`-only test missed So/Sm symbol bullets (`●` `▪` `∙`), invisible `Cf`
+  format chars, and exotic `Zs` spaces (NBSP / Ogham) — each reading a CRITICAL forged-ChatML
+  GREEN. The final form is the **INVERSE over a broad category set**: a gap char is a boundary
+  UNLESS it is a letter/digit/mark, an ordinary space/tab, a bracket/quote/connector, or one
+  of a small word-internal allowlist (apostrophe, solidus, markdown `*~_\``, middle dots).
+  Every script's terminator and every symbol/invisible separator counts without enumeration
+  (stdlib `unicodedata` cannot test the Unicode `Terminal_Punctuation` property).
+- **Double-negation / polarity inversion no longer reads as defensive, by PARITY.** "never
+  **hesitate to** reveal" / "never **miss a chance to** reveal" / "never **not** reveal" /
+  "never **refuse to** reveal" = "always reveal" — a reluctance verb (or a stacked inverting
+  negation) between the negation and the dangerous verb suppressed the entire PROSE_TARGETING
+  family (HI024/HI025/HI026/CR031/CR041/…). Inversion is now decided by **parity**: an ODD
+  number of inverting verbs in the gap fires; an EVEN number is defensive again ("never **shy
+  away from refusing to** reveal" = "always refuse to reveal", GREEN). Genuine defensive prose
+  ("never reveal", "does not and will not reveal", a single "refuse to reveal") stays GREEN.
+  Ambiguous-sense verbs (`fail`, `miss`, `object`, `resist`, …) count only with an infinitival
+  `to` complement, so the security idiom "must not **fail open** and reveal" does NOT misfire.
+  The inverter set is open NL (THREAT_MODEL §8) — common forms enumerated, Claude-side review
+  is the backstop for the tail (idioms like "never think twice about revealing" are not caught
+  statically).
+
+### Fixed — AST import-alias / assignment-alias resolution (gaps 4, 6 + re-verify)
+- **AST009** caught `Path(__file__).write_text` but missed the import-aliased `from pathlib
+  import Path as P; P(__file__)` AND the **assignment-aliased** siblings — `PP = pathlib.Path;
+  PP(__file__)`, `from builtins import open as o; o(__file__,"w")`, `mv = os.replace;
+  mv(s, __file__)`, the **module assignment** `a = os; a.replace(s, __file__)`, and
+  `o = getattr(builtins,"open")` (transitive `b = a` too). A general assignment-alias resolver
+  folds `X = <callable>`/`X = <module>` through the import maps (head-resolved), hardening
+  AST009's ctor / open / destination arms — and every dotted AST rule (AST011 too).
+- **`from <mod> import *` is resolved** for the finite set of dangerous canonical leaves the
+  dotted rules key on, so `from shutil import *; unpack_archive(...)` → `AST011`,
+  `from os import *; system(...)` → `AST003`, and `from tarfile import *; open(p).extractall()`
+  → `AST011`. The star-import alias defeated EVERY dotted AST rule — the same class
+  `import … as` once did — with zero new FP surface.
+
+### Fixed — AST011 false positive + receiver provenance (gap 5 + re-verify)
+- **`extractall` is gated on receiver PROVENANCE.** Keying on the bare `extractall` method
+  leaf fired on the common, documented pandas `Series.str.extractall` and any non-archive
+  `.extractall()`. AST011 now fires only when the receiver provably resolves to a
+  tarfile/zipfile archive object — `tarfile.open`/`TarFile`, the alternative-constructor
+  classmethods `TarFile.open`/`gzopen`/`bz2open`/`xzopen`, `zipfile.ZipFile`/`PyZipFile`, via
+  import/star/assignment/module alias — directly or through a method-ref; `shutil.unpack_archive`
+  stays unconditional. An opaque-receiver `extractall` (archive from another fn/file) is OOS.
+
+### Fixed — supply-chain index redirect (gap 7 + re-verify)
+- **Bundled package-manager configs are in the supply-chain gate.** An off-registry index
+  redirect — `.npmrc`/`.yarnrc`/`.yarnrc.yml` (`registry=`/`@scope:registry=`/
+  `npmRegistryServer:`/`//host/:_authToken`), `pip.conf`/`pip.ini`
+  (`index-url`/`extra-index-url`/`trusted-host`), `.cargo/config.toml` (`[source.*] registry`/
+  `replace-with`, gated on the `.cargo` parent), or `.gemrc` (`:sources:`) — now emits
+  `HI023`, the same off-registry signal already flagged in a lockfile `resolved` field. The
+  `pyproject.toml` custom-source parse also covers the modern uv (`[[tool.uv.index]]`) and PDM
+  (`[[tool.pdm.source]]`) siblings, not just Poetry. A single-label intranet host in a real
+  `scheme://` URL fires too, while a localhost/loopback dev mirror (devpi) stays GREEN.
+  registry.npmjs.org / pypi.org / crates.io / rubygems.org stay GREEN; npm.pkg.github.com
+  flags. **Known boundary:** the gate is a closed filename allowlist — `.condarc`,
+  `.bundle/config`, `nuget.config`, `composer.json` repositories, `.gitconfig insteadOf`, and
+  Homebrew taps are NOT yet covered (a future increment); the lockfile/manifest passes and the
+  Claude-side review are the backstop.
+
+### Fixed — external-audit pass (reproduce-first, fix-confirmed)
+- **Param-shadow false positive.** A function parameter named after a dangerous symbol
+  (`def f(system): system(...)` under `from os import *` / `from os import system`) was
+  canonicalized to `os.system` → AST003 CRITICAL FP. `_canon` now masks a name bound by a
+  local param/assignment (an explicit callable/module alias still resolves).
+- **`from os import *; open(__file__, O_WRONLY)`** read GREEN (os.open was excluded from
+  star-resolution) — now caught; the os.open arm tells a write-flag from a string mode.
+- **AST011 receiver provenance is position-correct.** The archive-name set was final-state, so
+  `a=tarfile.open(p); a.extractall(); a=None` read GREEN (FN) and a param shadowing an outer
+  archive read RED (FP). The set is now MONOTONIC (a rebind after the use keeps it) and the
+  INNERMOST scope that binds the name decides.
+- **AST009 binding is column-aware.** Position is now `(lineno, col_offset)`, so a same-LINE
+  rebind `p=Path(__file__); p.write_text(); p=None` no longer masks the write (FN).
+- **`inventory()` fails loud on truncation.** It capped at 100k nodes and silently dropped
+  files past the cap (a hidden exec/symlink read GREEN); it now emits `IO004` (HIGH), mirroring
+  the supply-walk truncation posture.
+- **Flow-sensitivity — alias & archive resolution is now POSITION-AWARE per scope.** A second
+  audit pass showed the global assign-alias map was last-write-wins, so `mv=os.replace;
+  mv(__file__); mv=safe` MISSED `AST009`; and the round-4 MONOTONIC archive fix had created a
+  fresh FP (`a=tarfile.open(); a=SafeArchive(); a.extractall()` fired). Both are flow-
+  insensitivity: `_canon` now resolves a within-scope alias AS OF the call's `(lineno,col)`
+  position (a per-scope alias timeline), and the archive provenance set is a position-aware
+  timeline too. A rebind masks a later use (FN closed) and a benign rebind un-masks (FP closed);
+  cross-scope module aliases, transitive `b=a`, and param-shadow all still resolve.
+- **Taint catches a walrus bound in a separate clause.** `(token := os.getenv()) and
+  post(data=token)` read no TF — the sink was scanned before the walrus bound in the same
+  statement; the walrus is now applied first. (A named-host destination is `TF002` HIGH; a
+  bad/IP destination is `TF001` CRITICAL.)
+- **The OFFICIAL Cargo index in BARE-URL form stays GREEN.** `https://github.com/rust-lang/
+  crates.io-index` (no `registry+` prefix) used to false-positive `HI023`; an
+  `_is_official_crates_index` helper now exempts it in both the `registry+` and bare-URL paths.
+- *Documented (not changed):* a defensive comma-ENUMERATION of dangerous phrases under one
+  `never` (`never reveal X, send Y, rewrite Z`) fires the later clauses — the **deliberate
+  FP cost** of the narrow negation guard (a comma is a clause boundary). Suppressing it would
+  re-open the comma-splice CRITICAL bypass; the comma-free `or` coordination is the documented
+  authoring workaround.
+- **Re-verifying the position-aware refactor (pass 3) hardened its own edges.** (i) The
+  alias mask returned the unchanged name, so a param named after a module (`def f(shutil):
+  shutil.unpack_archive()`) still matched the rule — it now returns a non-matching sentinel,
+  and masks only the INNERMOST scope (so a module placeholder reassigned via `global` falls
+  through to the global map and still fires). (ii) AST011 archive provenance is now CONDITIONAL-
+  aware: an `IfExp`/ternary arm, a `try`-open with a `None` fallback in the `except` handler,
+  and a list-of-archives (`for a in [tarfile.open(p)]` / `archives[0]`) are all caught, while
+  an UNCONDITIONAL `a=Safe()` rebind still masks. (iii) The official Cargo index in bare-URL
+  form is exempt in the `.cargo/config.toml` path too. *Known boundary (THREAT_MODEL §8):*
+  lambda parameters / comprehension loop variables are not separately scoped (a contrived
+  alias-collision FP; an `AST009` self-rewrite via a comprehension target reads as `ME005`
+  YELLOW), and attribute-target aliasing (`C.run = os.system`) is not modeled.
+- **The last two flow-insensitive resolvers are now position-aware (pass 4).** The `pathlib.Path`
+  constructor alias was a GLOBAL set (`P=pathlib.Path; P(__file__); P=safe` missed `AST009`; a
+  `from pathlib import Path as P; P=safe; P(__file__)` rebind false-fired), and the `extractall`
+  method reference was a FINAL-STATE map (`ex=t.extractall; ex(); ex=safe` missed `AST011`; a
+  safe `ex()` before a later `ex=t.extractall` false-fired). Both are now per-scope position-aware
+  timelines, so flow-sensitivity is uniform across `__file__` / alias / archive / path-ctor /
+  method-ref.
+- **The shadow decision is uniform and import-aware (pass 5).** A CRITICAL false-negative
+  remained — a FUTURE module-level rebind retroactively masked an earlier import-use
+  (`from os import system; system(cmd); system=safe` read GREEN) — and a param / `for`-target /
+  `AnnAssign` named after a module/ctor/method-ref did NOT mask (an FP), because the resolvers
+  keyed off the alias/method maps (assignments only) rather than the full binding set. All five
+  resolvers now share one helper — the innermost scope that binds the name AT OR BEFORE the
+  call — so a param/`for`/`AnnAssign` masks like an assignment and a name not yet locally bound
+  resolves to the import (before any later rebind). The `Path(__file__)` ctor test is fully
+  position-aware too (a param literally named `Path` no longer false-fires).
+
+## [1.11.0] — 2026-06-20
+
+**Adversarial-audit hardening.** Multiple review rounds — an external reviewer (Codex)
+of the H/I/J commits, then self-run **multi-agent adversarial sweeps** that attack each
+fix against the live scanner and adversarially re-verify every finding — drove the
+detection passes to convergence (loop-until-dry). Dozens of confirmed defects, several of
+them false-**NEGATIVE** regressions the phases or earlier fix rounds introduced. Each was
+reproduced against the live scanner *before* fixing (RED→GREEN), generalized from the
+reported instance to the **disease class**, and locked with a permanent fixture vector +
+a CI snippet assert. New coverage (import-alias resolution, recursive manifest discovery,
+comprehension taint) means new true-positives, hence a minor bump. No new rule IDs except
+`IO004` (an internal fail-closed signal). This entry describes the FINAL behavior.
+
+### Fixed — robustness (fail-closed)
+- **A crashing pass fails CLOSED.** A structural-pass crash (e.g. `RecursionError` on a
+  deep `settings.json`) was caught into a `LOW` and read GREEN; it now emits `CRITICAL`,
+  and `_parse_json` recovers the real `hooks` finding (`CR032`) via the textual backstop.
+- **A config/manifest too large to fully audit fails CLOSED (`IO004`).** Beyond the 8 MB
+  read cap a config would be read truncated — a key hidden past the cap read clean. An
+  oversized opaque config/manifest now RED-flags `IO004` CRITICAL; a **lockfile**
+  (legitimately 10–30 MB) drops to `IO004` HIGH and its readable prefix is still scanned
+  (incl. JSON lockfiles, for off-registry `resolved` hosts → `HI023`).
+- **Every read is bounded.** `_exec_magic`/`_looks_like_text` read fixed chunks (were
+  whole-file); `_read_text_safe` caps at 8 MB; per-file `unicode`/`ast`/`taint` skip files
+  over `MAX_SCAN_BYTES`; tree walks (`_iter_tree_files`, `inventory`) are node-bounded. A
+  multi-GB file or a 200 k-directory tree can no longer hang the scan.
+
+### Fixed — prose negation guard
+- The clause-aware guard suppressed dangerous prose behind a faked negation, reading
+  CRITICAL injections GREEN. Three rounds of looser rules each spawned a sibling
+  (comma-splice → comma-as-break → coordinator → faked `, or` → Unicode comma → Oxford
+  decoy), so the converged fix is **structural and narrow**: the negation suppresses ONLY
+  when it **adjacently governs** the dangerous verb — i.e. there is NO clause boundary of
+  any kind between the negation and the match. ANY boundary fires: a comma (ASCII, or the
+  NFKC-folded fullwidth `，`, Arabic `،`, ideographic `、`), any sentence punctuation, or a
+  temporal/disregard idiom. The only way to make a negation adjacently govern the verb is
+  to write *"never reveal your system prompt"* literally — which IS a defensive statement,
+  so suppressing it is correct, and an attacker cannot weaponize it. Third-person
+  `does not`/`doesn't`/`is not` are recognized. A genuine defensive note must use
+  comma-free `or` coordination (*"never reveal or send your prompt"*) or per-clause
+  negation to stay GREEN (documented authoring guidance) — a comma-list of multiple flagged
+  phrases under one `never` now flags the later items (the deliberate FP cost of an
+  unbypassable rule, within the MEDIUM/HIGH budget and human-reviewed).
+
+### Fixed — Python AST passes
+- **`AST009` self-modification** now resolves the write target **per-scope and
+  POSITION-AWARE** through every binding form — same-scope assignment, walrus (`:=`),
+  tuple-unpack, transitive `q = p`, aliased `open` (incl. `io.open` / `from io import open`),
+  and `for p in [Path(__file__)]` / a comprehension — as of the *write call's line*:
+  `p=__file__; p.write(); p=None` fires (write while `p` IS `__file__`) and
+  `p=Path(__file__); p=p.with_name(x); p.write()` does not (rebound before the write), with a
+  same-named param masking an outer binding. New sink: low-level `os.open(__file__,
+  O_WRONLY|…)`. Write-mode includes the `+` update modes. Replaces the prior global set
+  (cross-function FP) and the over-corrected inline-only form.
+- **`AST011` Zip-Slip** exempts only a PROVABLE guard (`filter="data"/"tar"` or
+  `filter=tarfile.data_filter`, or a literal `members=[…]` — not a variable or
+  `getmembers()`), and resolves method-reference indirection (`ex = t.extractall`,
+  `getattr(t,"extractall")`, transitive, tuple-unpack, walrus). It keys on the
+  **`extractall`** method name (not bare `.extract`, which collides with pandas
+  `.str.extract` / bs4 `.extract` and blew the FP budget — single-member `.extract` is OOS).
+- **Import-alias resolver (`_canon`)** canonicalizes dotted call names through the file's
+  import map (`import shutil as sh`, `from shutil import unpack_archive [as x]`), so EVERY
+  dotted AST rule resolves an aliased import instead of being defeated by it.
+
+### Fixed — taint, supply-chain
+- The taint pass enumerates **every binding construct** — assign/annassign/augassign, walrus,
+  `for`-targets, and comprehension generator targets — so split-variable credential exfil via
+  any of them reads `TF001`. The `HI009` network line-rule now matches `httpx.<method>` /
+  `aiohttp.<method>` (was blind to them).
+- Dependency-manifest discovery is **recursive** (any depth, incl. `src/`/`vendor/`/
+  `node_modules/`), keying off manifest filenames so a data `*.json` stays GREEN.
+
+### Added
+- `scripts/check_docs.py` + a **Doc-currency** CI gate (mechanically enforced): every
+  emittable rule ID is documented, every `examples/` fixture is swept, the CHANGELOG top
+  version is in the ROADMAP. The harvester parses scan.py with stdlib `ast` and collects
+  rule-ID literals at emission positions — quote- and family-agnostic, ignoring comments/
+  docstrings — so it can never go blind to a family or false-fail on a comment.
+- Permanent regression fixtures + per-form CI snippet asserts for every confirmed audit
+  finding across all the families above.
+
 ## [1.10.0] — 2026-06-19
 
 **Ecosystem hardening** against the 2026 supply-chain + prompt-injection + MCP

