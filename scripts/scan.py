@@ -2338,6 +2338,26 @@ _ARCHIVE_OPENERS = frozenset({
 })
 
 
+class _VF:
+    """Unified abstract value facts — the SINGLE source of binding/resolution semantics that the
+    round-9 migration uses to collapse the four per-scope timelines (alias / __file__ / archive /
+    method-ref) into one. `canon` = dotted callable/module canonical ('os.system' / 'os' /
+    'tarfile.open' / 'pathlib.Path' / None = unknown); `self_file` = the skill's own __file__ /
+    Path(__file__); `archive` = an opened tar/zip archive; `mleaf`/`mrecv` = a bound method-ref leaf
+    + whether its receiver was an archive; `seq` (a nested _VF or None) = the REPRESENTATIVE element
+    of a literal sequence, so a `for x in [os.system]` / `archives[0]` unwraps it. The empty `_VF()`
+    is the bottom (a captured exception / opaque value)."""
+    __slots__ = ("canon", "self_file", "archive", "mleaf", "mrecv", "seq")
+
+    def __init__(self, canon=None, self_file=False, archive=False, mleaf=None, mrecv=False, seq=None):
+        self.canon = canon
+        self.self_file = self_file
+        self.archive = archive
+        self.mleaf = mleaf
+        self.mrecv = mrecv
+        self.seq = seq
+
+
 def _names_in_target(target):
     """Yield every Name id an assignment target binds (Name, or nested Tuple/List/Starred)."""
     if isinstance(target, ast.Name):
@@ -2614,6 +2634,10 @@ class _AstAuditor(ast.NodeVisitor):
         # __file__/archive/method-ref), while a use AFTER falls through to the normal timelines —
         # block-scoped masking that does NOT poison _local_binding_scope (round-8 audit F1).
         self.capture_scopes = []
+        # round-9: the unified _VF timeline stack, pushed in lockstep with the four old timelines —
+        # built parallel and differential-checked (self._diff) before switching the resolvers to it.
+        self.fact_scopes = []
+        self._diff = None           # when a list, _canon logs (pos, old, new) divergences for parity
         self.findings = []
 
     def _resolve_import(self, name):
@@ -2679,6 +2703,18 @@ class _AstAuditor(ast.NodeVisitor):
         return self._resolve_import(nm) == "pathlib.Path"   # the import (before any rebind)
 
     def _canon(self, name, pos=None):
+        """Differential wrapper (round-9): old _canon_impl, and when self._diff is active, log any
+        divergence from the new _facts_at-based _canon_v so the migration can reach parity."""
+        r = self._canon_impl(name, pos)
+        # log only at REAL resolution depth (all scopes incl. fact_scopes pushed) — not during the
+        # build of the old timelines, where fact_scopes for the current scope is not yet pushed.
+        if self._diff is not None and pos is not None and name and len(self.fact_scopes) == len(self.scopes):
+            v = self._canon_v(name, pos)
+            if v != r:
+                self._diff.append(("canon", name, pos, r, v))
+        return r
+
+    def _canon_impl(self, name, pos=None):
         """Canonicalize a dotted call name to its real `module.X`. When a `pos` (lineno,
         col_offset) is given, a WITHIN-SCOPE assignment alias is resolved POSITION-AWARELY
         first: the innermost scope that binds the head decides via its most-recent binding AS
@@ -2793,6 +2829,192 @@ class _AstAuditor(ast.NodeVisitor):
                 walk(n)
         walk(scope_node)
         return regions
+
+    # ===== round-9: unified abstract-interpreter evaluator =====================================
+    # Built PARALLEL to the four old per-scope timeline walkers (alias / __file__ / archive /
+    # method-ref). One eval_expr computes ALL provenance domains into one _VF; one bind_target stores
+    # them; _facts_at reads as-of a position (cross-scope + capture overlay). Differential-checked
+    # against the old resolvers on the corpus, then switched domain-by-domain. Ends the H1-H7 cycle.
+
+    def _scope_facts(self, scope_node, param_names=()):
+        """THE unified per-scope timeline {name: [(pos, _VF)]} — ONE walk + ONE bind_target + ONE
+        eval_expr carrying ALL provenance domains. NOT into nested scopes. A capture (except/match)
+        is recorded as its PRIOR binding here; local_at / _facts_at mask it block-scoped via the
+        overlay, so a post-block / post-rebind use resolves normally."""
+        facts = {}
+        NE = getattr(ast, "NamedExpr", None)
+
+        def add(name, pos, vf):
+            facts.setdefault(name, []).append((pos, vf))
+
+        for p in param_names:
+            add(p, (0, 0), _VF())          # a param masks (opaque)
+
+        def local_at(name, pos):
+            for mp, rp in (self.capture_scopes[-1].get(name, ()) if self.capture_scopes else ()):
+                if mp <= pos < rp and not any(mp < bp <= pos for bp, _f in facts.get(name, ())):
+                    return _VF()           # a LIVE capture -> opaque (yields to an in-block rebind)
+            vf, bound = None, False
+            for bp, f in facts.get(name, ()):
+                if bp <= pos:
+                    bound, vf = True, f
+            return vf if bound else None
+
+        def is_getattr_call(node, pos):
+            if not (isinstance(node, ast.Call) and len(node.args) >= 2
+                    and isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str)):
+                return None
+            if eval_expr(node.func, pos).canon in ("getattr", "builtins.getattr"):
+                return node.args[0], node.args[1].value
+            return None
+
+        def seq_rep(elts, pos):
+            els = [eval_expr(e, pos) for e in elts]
+            return _VF(
+                canon=next((e.canon for e in els if e.canon and "." in e.canon), None),
+                archive=any(e.archive for e in els),
+                self_file=any(e.self_file for e in els),
+                mleaf=next((e.mleaf for e in els if e.mleaf), None),
+                mrecv=any(e.mrecv for e in els),
+            )
+
+        def eval_expr(node, pos):
+            if NE is not None and isinstance(node, NE):
+                return eval_expr(node.value, pos)
+            if _is_own_file_target(node, self._path_ctor_at):
+                return _VF(self_file=True)
+            if isinstance(node, ast.Name):
+                f = local_at(node.id, pos)
+                return f if f is not None else _VF(canon=self._resolve_import(node.id))
+            if isinstance(node, ast.Attribute):
+                base = eval_expr(node.value, pos)
+                canon = (base.canon + "." + node.attr) if base.canon else None
+                return _VF(canon=canon, mleaf=node.attr, mrecv=base.archive)
+            if isinstance(node, ast.Call):
+                if self._func_canon(node.func, pos) in _ARCHIVE_OPENERS:
+                    return _VF(archive=True)
+                ga = is_getattr_call(node, pos)
+                if ga:
+                    base = eval_expr(ga[0], pos)
+                    canon = (base.canon + "." + ga[1]) if base.canon else None
+                    return _VF(canon=canon, mleaf=ga[1], mrecv=base.archive)
+                return _VF()
+            if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+                return _VF(seq=seq_rep(node.elts, pos))
+            if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+                return _VF(seq=eval_expr(node.elt, pos))
+            if isinstance(node, ast.Subscript):
+                v = eval_expr(node.value, pos)
+                return v.seq if v.seq is not None else _VF()
+            if isinstance(node, ast.IfExp):
+                a, b = eval_expr(node.body, pos), eval_expr(node.orelse, pos)
+                return _VF(self_file=a.self_file or b.self_file, archive=a.archive or b.archive,
+                           canon=a.canon if a.canon == b.canon else None)
+            return _VF()
+
+        def bind_target(target, value, pos):
+            if isinstance(target, ast.Name):
+                add(target.id, pos, eval_expr(value, pos) if value is not None else _VF())
+            elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)) \
+                    and len(target.elts) == len(value.elts):
+                for t_el, v_el in zip(target.elts, value.elts):
+                    bind_target(t_el, v_el, pos)
+            else:
+                for nm in _names_in_target(target):
+                    add(nm, pos, _VF())
+
+        def walk(node):
+            for n in ast.iter_child_nodes(node):
+                pos = (getattr(n, "lineno", 0), getattr(n, "col_offset", 0))
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    add(n.name, pos, _VF())
+                    continue
+                if isinstance(n, ast.Lambda):
+                    continue
+                if NE is not None and isinstance(n, NE) and isinstance(n.target, ast.Name):
+                    add(n.target.id, pos, eval_expr(n.value, pos))
+                elif isinstance(n, ast.Assign):
+                    for tgt in n.targets:
+                        bind_target(tgt, n.value, pos)
+                elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+                    if n.value is not None:
+                        add(n.target.id, pos, eval_expr(n.value, pos))
+                elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
+                    add(n.target.id, pos, _VF())
+                elif isinstance(n, (ast.For, ast.AsyncFor)):
+                    if isinstance(n.target, ast.Name):
+                        it = eval_expr(n.iter, pos)
+                        add(n.target.id, pos, it.seq if it.seq is not None else _VF())
+                    else:
+                        for nm in _names_in_target(n.target):
+                            add(nm, pos, _VF())
+                elif isinstance(n, (ast.With, ast.AsyncWith)):
+                    for item in n.items:
+                        if item.optional_vars is not None:
+                            if isinstance(item.optional_vars, ast.Name):
+                                add(item.optional_vars.id, pos, _VF(archive=eval_expr(item.context_expr, pos).archive))
+                            else:
+                                for nm in _names_in_target(item.optional_vars):
+                                    add(nm, pos, _VF())
+                elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                    for bnd, canon in _import_canon(n):
+                        add(bnd, pos, _VF(canon=self._resolve_import(canon)) if canon else _VF())
+                walk(n)
+        walk(scope_node)
+        return facts
+
+    def _facts_at(self, name, pos):
+        """The _VF for `name` AS OF pos — the innermost fact-scope that binds it (cross-scope, like
+        _local_binding_scope), masked block-scoped by the capture overlay. _VF() (opaque) if
+        captured-not-rebound; None if not bound in any active scope (caller resolves via imports)."""
+        if self._capture_masked(name, pos):
+            return _VF()
+        for binds in reversed(self.fact_scopes):
+            tl = binds.get(name)
+            if tl:
+                vf, bound = None, False
+                for bp, f in tl:
+                    if bp <= pos:
+                        bound, vf = True, f
+                if bound:
+                    return vf
+        return None
+
+    def _canon_v(self, name, pos):
+        """NEW canonical resolver over the unified _VF timeline (round-9), structurally mirroring
+        _canon_impl but reading fact_scopes: the innermost fact-scope binding the head decides; an
+        outer-scope non-alias falls through to the SAME flow-insensitive global map (assign_aliases /
+        imports) — so the cross-scope global-rebind (`global run; run=os.system`) still resolves."""
+        head, dot, rest = name.partition(".")
+        if self._capture_masked(head, pos):
+            return None
+        i = None
+        for idx in range(len(self.fact_scopes) - 1, -1, -1):
+            tl = self.fact_scopes[idx].get(head)
+            if tl and any(bp <= pos for bp, _f in tl):
+                i = idx
+                break
+        if i is None:
+            return self._resolve_import(name)        # not locally bound -> import maps (not global)
+        f = None
+        for bp, ff in self.fact_scopes[i].get(head, ()):
+            if bp <= pos:
+                f = ff
+        if f.canon:
+            return f.canon + ("." + rest if dot else "")
+        if i == len(self.fact_scopes) - 1:
+            return None                              # innermost non-alias shadow -> masks
+        if name in self.assign_aliases:              # outer-scope non-alias -> global fallback
+            return self.assign_aliases[name]
+        if self._shadowed(head):
+            return name
+        if name in self.import_from:
+            return self.import_from[name]
+        if dot and head in self.import_modules:
+            return self.import_modules[head] + "." + rest
+        if dot and head in self.assign_aliases:
+            return self.assign_aliases[head] + "." + rest
+        return self._resolve_import(name)
 
     def _scope_alias_bindings(self, scope_node, param_names=()):
         """{name: [((lineno,col), canonical_or_None), …]} in source order — a POSITION-AWARE
@@ -3403,12 +3625,14 @@ class _AstAuditor(ast.NodeVisitor):
         self.scopes.append(self._scope_bindings(node, is_path_ctor=self._path_ctor_at, is_captured=self._capture_masked))
         self.archive_scopes.append(self._scope_archive_names(node))
         self.method_scopes.append(self._scope_method_refs(node))
+        self.fact_scopes.append(self._scope_facts(node))         # round-9: parallel unified timeline
         self.generic_visit(node)
         self.alias_scopes.pop()
         self.capture_scopes.pop()
         self.scopes.pop()
         self.archive_scopes.pop()
         self.method_scopes.pop()
+        self.fact_scopes.pop()
 
     def visit_FunctionDef(self, node):
         params = [a.arg for a in self._arg_names(node)]
@@ -3417,12 +3641,14 @@ class _AstAuditor(ast.NodeVisitor):
         self.scopes.append(self._scope_bindings(node, params, self._path_ctor_at, self._capture_masked))
         self.archive_scopes.append(self._scope_archive_names(node))
         self.method_scopes.append(self._scope_method_refs(node))
+        self.fact_scopes.append(self._scope_facts(node, params))  # round-9: parallel unified timeline
         self.generic_visit(node)
         self.alias_scopes.pop()
         self.capture_scopes.pop()
         self.scopes.pop()
         self.archive_scopes.pop()
         self.method_scopes.pop()
+        self.fact_scopes.pop()
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
@@ -3592,6 +3818,9 @@ class _AstAuditor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+_DIFF_SINK = None   # round-9 migration: set to a list to collect old-vs-new resolver divergences
+
+
 def ast_scan(path: Path, rel: str) -> list[Finding]:
     """AST pass for a single .py file. Parses with ast.parse (never executes);
     degrades to a no-op if the source will not parse."""
@@ -3700,6 +3929,7 @@ def ast_scan(path: Path, rel: str) -> list[Finding]:
     # the auditor's _path_ctor_at via the per-scope alias timeline, not a global set.)
     auditor = _AstAuditor(rel, text, alias, open_aliases, import_modules, import_from,
                           star_modules, assign_aliases)
+    auditor._diff = _DIFF_SINK            # round-9: collect old-vs-new resolver divergences (dev)
     auditor.visit(tree)
     return auditor.findings
 
