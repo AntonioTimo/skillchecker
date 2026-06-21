@@ -293,3 +293,26 @@ def unpack_methodref_subscript(path):
     # the archive .extractall is selected by a literal-seq subscript — `[t.extractall][0](d)`;
     # the members-aware gate sees the archive method-ref at index 0 -> AST011 (/srv/victim25).
     [tarfile.open(path).extractall][0]("/srv/victim25")
+
+
+# --- closure under expression constructors (Codex reject 2 + workflow re-sweep): the archive provenance
+#     must survive an IfExp-with-__file__-arm / a for-target union / a comprehension subscript. ---
+
+def unpack_archive_ifexp_file_arm(path):
+    # `(tarfile.open(p) if c else __file__).extractall(d)` — the __file__ arm must NOT short-circuit the
+    # IfExp to self-file and DROP the archive member (workflow re-sweep FN2) -> AST011 (/srv/victim26).
+    (tarfile.open(path) if path else __file__).extractall("/srv/victim26")
+
+
+def unpack_archive_for_union(path):
+    # a for-target over a union of differing-length iterables, one holding an archive method-ref — the
+    # loop var unions every element so the archive is reachable (workflow re-sweep FN3) -> AST011.
+    import math
+    for ex in ((tarfile.open(path).extractall,) if path else (math.sin, math.cos)):
+        ex("/srv/victim27")
+
+
+def unpack_archive_comprehension(path, items):
+    # a comprehension of archive method-refs indexed at a constant >= its representative length — the
+    # length is unknown, so the archive representative is selected (workflow re-sweep FN1) -> AST011.
+    [tarfile.open(path).extractall for _ in items][2]("/srv/victim28")

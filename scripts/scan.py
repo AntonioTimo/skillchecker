@@ -2326,29 +2326,58 @@ _STAR_RESOLVABLE = frozenset({
 }) | _OS_EXEC_FAMILY
 
 
-def _const_seq_index(slice_node, n):
-    """The resolved 0-based index if `slice_node` is a CONSTANT integer subscript into an n-element
-    literal sequence (supporting a negative index), else None — so `(a, b)[1]` selects exactly `b`
-    while a dynamic `seq[i]` stays an unknown pick over the whole sequence (Codex F2: ignoring the
-    index both missed a dangerous element behind a benign-first one and FP'd the reverse)."""
+def _const_index_value(slice_node):
+    """The SIGNED integer of a CONSTANT integer subscript (a negative literal `[-1]` parses as
+    UnaryOp(USub, Constant(1)), not Constant(-1), so it is unwrapped), else None — REGARDLESS of range.
+    The per-member range check is the caller's, so an out-of-range constant index on one member of a
+    union of differing-length sequences is that member's dead path (not a fall-through to 'dynamic')."""
     s = slice_node
     Index = getattr(ast, "Index", None)
     if Index is not None and isinstance(s, Index):     # Python < 3.9 wraps the index expr
         s = s.value
-    val = None
     if isinstance(s, ast.Constant) and isinstance(s.value, int) and not isinstance(s.value, bool):
-        val = s.value
-    elif (isinstance(s, ast.UnaryOp) and isinstance(s.op, (ast.USub, ast.UAdd))
-          and isinstance(s.operand, ast.Constant) and isinstance(s.operand.value, int)
-          and not isinstance(s.operand.value, bool)):
-        # a NEGATIVE literal `[-1]` parses as UnaryOp(USub, Constant(1)), not Constant(-1) — unwrap it
-        # so a negative constant index is honored too (else it falls to the dynamic prefer-dangerous arm
-        # and FP'd `(os.system, math.sin)[-1]`).
-        val = -s.operand.value if isinstance(s.op, ast.USub) else s.operand.value
-    if val is None:
-        return None
-    i = val + n if val < 0 else val
-    return i if 0 <= i < n else None
+        return s.value
+    if (isinstance(s, ast.UnaryOp) and isinstance(s.op, (ast.USub, ast.UAdd))
+            and isinstance(s.operand, ast.Constant) and isinstance(s.operand.value, int)
+            and not isinstance(s.operand.value, bool)):
+        return -s.operand.value if isinstance(s.op, ast.USub) else s.operand.value
+    return None
+
+
+def _vf_attr(base, attr):
+    """ATTRIBUTE access lifted over a union base — `(math if c else os).system` distributes to the
+    union {math.system, os.system}, so a dangerous member is not lost behind the summary canon (which
+    is None when members disagree). Each member yields a method-ref _VF (`.canon`, leaf, archive-recv);
+    self_file is deliberately NOT propagated (an attribute of __file__ is a DERIVED file, not __file__).
+    Codex: the set model must be CLOSED under every expression constructor, not just the top level."""
+    return _vf_join_all([
+        _VF(canon=(m.canon + "." + attr) if m.canon else None, mleaf=attr, mrecv=m.archive)
+        for m in _vf_members(base)
+    ])
+
+
+def _subscript_union(v, slice_node):
+    """SUBSCRIPT lifted over a union sequence value — MAPS over members then joins, so a union of
+    sequences of DIFFERENT lengths cannot hide a dangerous element (the summary `seq` is None when
+    lengths disagree). A constant index selects exactly that element PER member (out of a member's
+    range = that member's dead path -> contributes nothing); a dynamic index contributes every element
+    (conservative — fire if ANY could be selected)."""
+    ci = _const_index_value(slice_node)
+    parts = []
+    for m in _vf_members(v):
+        if m.seq is None:
+            continue
+        if ci is not None and not m.seq_open:
+            # a LITERAL sequence has a KNOWN length: a constant index out of range is a dead path.
+            j = ci + len(m.seq) if ci < 0 else ci
+            if 0 <= j < len(m.seq):
+                parts.append(m.seq[j])
+        else:
+            # a dynamic index, OR an UNBOUNDED (comprehension) seq whose length is unknown — every
+            # index yields the representative (workflow re-sweep FN1: a const index >= the rep length
+            # was wrongly dropped as a dead path for a comprehension).
+            parts.extend(m.seq)
+    return _vf_join_all(parts) if parts else _VF()
 
 # Archive openers whose result object's `.extractall()` is the Zip-Slip sink (AST011). The
 # AST011 extractall arm fires ONLY when its receiver provably resolves to one of these
@@ -2378,11 +2407,15 @@ class _VF:
     findings (the join `_vf_join` is commutative / associative / idempotent — a set union). The
     scalar fields of a union are the conservative SUMMARY (self_file/archive = any member; canon =
     the common one or None; mleaf/mrecv = an archive method-ref if any member is one, else common).
+    `seq_open` marks an UNBOUNDED-length sequence whose `seq` is a single REPRESENTATIVE element (a
+    comprehension `[expr for …]` — its length is unknown, every element is the rep). For such a seq a
+    subscript at ANY index yields the rep (no constant index is provably out of range), unlike a literal
+    list/tuple where the length is known and an out-of-range constant index is a dead path.
     The empty `_VF()` is the bottom (a captured exception / opaque value)."""
-    __slots__ = ("canon", "self_file", "archive", "mleaf", "mrecv", "seq", "members")
+    __slots__ = ("canon", "self_file", "archive", "mleaf", "mrecv", "seq", "members", "seq_open")
 
     def __init__(self, canon=None, self_file=False, archive=False, mleaf=None, mrecv=False,
-                 seq=None, members=None):
+                 seq=None, members=None, seq_open=False):
         self.canon = canon
         self.self_file = self_file
         self.archive = archive
@@ -2390,6 +2423,7 @@ class _VF:
         self.mrecv = mrecv
         self.seq = seq
         self.members = members
+        self.seq_open = seq_open
 
 
 def _vf_members(vf):
@@ -2405,7 +2439,7 @@ def _seq_has_archive(seq):
 
 def _vf_dedup_key(vf):
     """A hashable identity for a point _VF, so `_vf_join` deduplicates members (idempotence)."""
-    return (vf.canon, vf.self_file, vf.archive, vf.mleaf, vf.mrecv,
+    return (vf.canon, vf.self_file, vf.archive, vf.mleaf, vf.mrecv, vf.seq_open,
             tuple(_vf_dedup_key(e) for e in vf.seq) if vf.seq is not None else None)
 
 
@@ -2429,7 +2463,8 @@ def _vf_summary(ms):
         seq = None
     return _VF(canon=(next(iter(canons)) if len(canons) == 1 else None),
                self_file=any(m.self_file for m in ms), archive=any(m.archive for m in ms),
-               mleaf=ml, mrecv=mr, seq=seq, members=tuple(ms))
+               mleaf=ml, mrecv=mr, seq=seq, members=tuple(ms),
+               seq_open=any(m.seq_open for m in ms))
 
 
 def _vf_join(a, b):
@@ -2500,7 +2535,8 @@ def _resolve_tl(tl, pos):
     # has been masked by an unconditional non-archive rebind.
     seq = last.seq if (seqarch or (last.seq is not None and not _seq_has_archive(last.seq))) else None
     return _VF(canon=last.canon, self_file=last.self_file, archive=arch,
-               mleaf=last.mleaf, mrecv=last.mrecv, seq=seq, members=last.members)
+               mleaf=last.mleaf, mrecv=last.mrecv, seq=seq, members=last.members,
+               seq_open=last.seq_open)
 
 
 def _names_in_target(target):
@@ -2603,9 +2639,14 @@ def _is_own_file_target(node, is_path_ctor=None) -> bool:
     NE = getattr(ast, "NamedExpr", None)
     if NE is not None and isinstance(node, NE):
         return _is_own_file_target(node.value, is_path_ctor)
-    if isinstance(node, ast.IfExp):                # `(__file__ if c else __file__)` — EITHER arm is
-        return _is_own_file_target(node.body, is_path_ctor) \
-            or _is_own_file_target(node.orelse, is_path_ctor)   # the running file (round-10)
+    # NOTE: an IfExp is deliberately NOT handled here. This function is a TOP short-circuit in
+    # _facts_of / eval_expr; recursing an IfExp with OR would collapse the WHOLE ternary to
+    # self_file whenever EITHER arm is __file__, DISCARDING the other arm's facts — so
+    # `(tarfile.open(p) if c else __file__).extractall()` lost the archive member and read GREEN
+    # (workflow re-sweep FN2, broad: any `(dangerous if c else __file__)`). self_file is instead
+    # lifted through the IfExp JOIN (each arm resolved separately, then unioned), like every other
+    # domain; `_self_target` reads the joined self_file fact. So `(__file__ if c else __file__)`
+    # still resolves self_file via the join, and a dangerous sibling arm survives.
     if isinstance(node, ast.Name):
         return node.id == "__file__"
     if isinstance(node, ast.Call):
@@ -2918,7 +2959,8 @@ class _AstAuditor(ast.NodeVisitor):
             if not (isinstance(node, ast.Call) and len(node.args) >= 2
                     and isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str)):
                 return None
-            if eval_expr(node.func, pos).canon in ("getattr", "builtins.getattr"):
+            if any(m.canon in ("getattr", "builtins.getattr")
+                   for m in _vf_members(eval_expr(node.func, pos))):
                 return node.args[0], node.args[1].value
             return None
 
@@ -2938,34 +2980,31 @@ class _AstAuditor(ast.NodeVisitor):
                 f = local_at(node.id, pos)
                 return f if f is not None else _VF(canon=self._resolve_import(node.id))
             if isinstance(node, ast.Attribute):
-                base = eval_expr(node.value, pos)
-                canon = (base.canon + "." + node.attr) if base.canon else None
-                return _VF(canon=canon, mleaf=node.attr, mrecv=base.archive)
+                return _vf_attr(eval_expr(node.value, pos), node.attr)   # lift over a union base
             if isinstance(node, ast.Call):
-                if eval_expr(node.func, pos).canon in _ARCHIVE_OPENERS:
+                if any(m.canon in _ARCHIVE_OPENERS for m in _vf_members(eval_expr(node.func, pos))):
                     return _VF(archive=True)
+                # the Path constructor preserves self-file provenance (closure under the ctor) — so a
+                # bound `Path(t[0])` whose element is __file__ is self-file too.
+                if (len(node.args) == 1 and not node.keywords and is_path_ctor(node.func)
+                        and eval_expr(node.args[0], pos).self_file):
+                    return _VF(self_file=True)
                 ga = is_getattr_call(node, pos)
                 if ga:
-                    base = eval_expr(ga[0], pos)
-                    canon = (base.canon + "." + ga[1]) if base.canon else None
-                    return _VF(canon=canon, mleaf=ga[1], mrecv=base.archive)
+                    return _vf_attr(eval_expr(ga[0], pos), ga[1])        # getattr base, lifted too
                 return _VF()
             if isinstance(node, (ast.List, ast.Tuple)):
                 # POSITIONAL elements — a literal list/tuple, so `(a, b)[1]` selects EXACTLY `b`. A
                 # SET literal is unordered / not indexable, so it carries no positional seq.
                 return _VF(seq=tuple(eval_expr(e, pos) for e in node.elts))
             if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-                # a comprehension's length is unknown -> a single representative element (its index
-                # cannot be honored; the dynamic-index join below collapses to that element).
-                return _VF(seq=(eval_expr(node.elt, pos),))
+                # a comprehension's length is UNKNOWN -> a single representative element, seq_open so a
+                # subscript at ANY index yields the rep (its length is not authoritative).
+                return _VF(seq=(eval_expr(node.elt, pos),), seq_open=True)
             if isinstance(node, ast.Subscript):
-                v = eval_expr(node.value, pos)
-                if v.seq is None:
-                    return _VF()
-                idx = _const_seq_index(node.slice, len(v.seq))
-                # a CONSTANT index selects EXACTLY that element; a dynamic index could pick ANY -> the
-                # commutative union of all elements (no FN, no order/index dependence).
-                return v.seq[idx] if idx is not None else _vf_join_all(list(v.seq))
+                # lift over the union: a constant index selects that element per member, a dynamic index
+                # the union of all — so a union of differing-length sequences hides nothing.
+                return _subscript_union(eval_expr(node.value, pos), node.slice)
             if isinstance(node, ast.IfExp):
                 # the value is the SET of both arms (commutative union) — not a first-truthy / danger-
                 # preferred representative. The dispatch enumerates members, so a benign arm can not
@@ -3005,8 +3044,11 @@ class _AstAuditor(ast.NodeVisitor):
                 elif isinstance(n, (ast.For, ast.AsyncFor)):
                     if isinstance(n.target, ast.Name):
                         it = eval_expr(n.iter, pos)
-                        # the loop var takes ANY element -> the commutative union of the positional seq
-                        add(n.target.id, pos, _vf_join_all(list(it.seq)) if it.seq is not None else _VF(), cond)
+                        # the loop var takes ANY element of the iterable -> the commutative union of
+                        # EVERY element across ALL union members (not the scalar summary `it.seq`, which
+                        # is None for a union of differing-length sequences — workflow re-sweep FN3).
+                        elts = [e for m in _vf_members(it) if m.seq is not None for e in m.seq]
+                        add(n.target.id, pos, _vf_join_all(elts) if elts else _VF(), cond)
                     else:
                         for nm in _names_in_target(n.target):
                             add(nm, pos, _VF(), cond)
@@ -3040,15 +3082,17 @@ class _AstAuditor(ast.NodeVisitor):
         return None
 
     def _self_target(self, node) -> bool:
-        """The skill's own running file: inline `__file__`/`Path(__file__)` (walrus unwrapped), OR a
-        Name resolving to it over the unified _VF timeline (capture-masked, cross-scope). round-9."""
+        """The skill's own running file: inline `__file__`/`Path(__file__)` (walrus unwrapped), OR ANY
+        node whose UNIFIED self_file fact is set — a Name resolving to it, a `(__file__, x)[0]` subscript,
+        an `(__file__ if c else …)` arm, a bound such (capture-masked, cross-scope). Reading the final
+        self_file fact via _facts_of (not just a Name) closes the constructor gap (Codex: `open((__file__,
+        "safe")[0], "w")` and its bound/dynamic-index siblings read GREEN / a generic ME005 before)."""
+        if node is None:
+            return False
         if _is_own_file_target(node, self._path_ctor_at):
             return True
-        if isinstance(node, ast.Name):
-            pos = (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
-            f = self._facts_at(node.id, pos)
-            return bool(f and f.self_file)
-        return False
+        pos = (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+        return bool(self._facts_of(node, pos).self_file)
 
     def _getattr_call_parts(self, node, pos):
         """(base_node, attr_str) if `node` is an inline `getattr(<base>, "<literal>")` whose getattr
@@ -3086,31 +3130,30 @@ class _AstAuditor(ast.NodeVisitor):
             if f.members is not None:
                 return f
             return _VF(canon=c, self_file=f.self_file, archive=f.archive,
-                       mleaf=f.mleaf, mrecv=f.mrecv, seq=f.seq)
+                       mleaf=f.mleaf, mrecv=f.mrecv, seq=f.seq, seq_open=f.seq_open)
         if isinstance(node, ast.Attribute):
-            base = self._facts_of(node.value, pos)
-            canon = (base.canon + "." + node.attr) if base.canon else None
-            return _VF(canon=canon, mleaf=node.attr, mrecv=base.archive)
+            return _vf_attr(self._facts_of(node.value, pos), node.attr)   # lift over a union base
         if isinstance(node, ast.Call):
-            if any(m.canon in _ARCHIVE_OPENERS
-                   for m in _vf_members(self._facts_of(node.func, pos))):
+            ff = self._facts_of(node.func, pos)
+            if any(m.canon in _ARCHIVE_OPENERS for m in _vf_members(ff)):
                 return _VF(archive=True)
+            # the Path CONSTRUCTOR preserves self-file provenance — `Path(<self-file>)` reached through
+            # a subscript / bound name / union arg the inline `_is_own_file_target` top check can't see
+            # (Codex: the set model must be closed under the Path ctor too).
+            if (len(node.args) == 1 and not node.keywords
+                    and any(m.canon == "pathlib.Path" for m in _vf_members(ff))
+                    and self._facts_of(node.args[0], pos).self_file):
+                return _VF(self_file=True)
             ga = self._getattr_call_parts(node, pos)
             if ga:
-                base = self._facts_of(ga[0], pos)
-                canon = (base.canon + "." + ga[1]) if base.canon else None
-                return _VF(canon=canon, mleaf=ga[1], mrecv=base.archive)
+                return _vf_attr(self._facts_of(ga[0], pos), ga[1])        # getattr base, lifted too
             return _VF()
         if isinstance(node, (ast.List, ast.Tuple)):
             return _VF(seq=tuple(self._facts_of(e, pos) for e in node.elts))
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-            return _VF(seq=(self._facts_of(node.elt, pos),))
+            return _VF(seq=(self._facts_of(node.elt, pos),), seq_open=True)   # unbounded length
         if isinstance(node, ast.Subscript):
-            v = self._facts_of(node.value, pos)
-            if v.seq is None:
-                return _VF()
-            idx = _const_seq_index(node.slice, len(v.seq))
-            return v.seq[idx] if idx is not None else _vf_join_all(list(v.seq))
+            return _subscript_union(self._facts_of(node.value, pos), node.slice)  # lift over the union
         if isinstance(node, ast.IfExp):
             return _vf_join(self._facts_of(node.body, pos), self._facts_of(node.orelse, pos))
         return _VF()

@@ -205,9 +205,17 @@ closed), a literal subscript HONORS its constant index (incl. negative — `(a, 
 through a Name-bound sequence), a dynamic index is CONSERVATIVE (fires if ANY element is dangerous — a
 possible FP, never an FN), and a cross-rule union fires EVERY member's rule (`(os.system if c else
 pickle.loads)(x)` → both AST003 and AST004), order-independent (the join is commutative / associative /
-idempotent). What remains open here is a **comprehension loop-variable** (its own scope, not modeled — so
-`[g for g in (os.system,)][0]()` reads GREEN) and a **dict/set-literal subscript callee** (`{0: os.system}
-[0]()` — only list/tuple carry a positional seq), both the obfuscation tail; plus **cross-scope `nonlocal`**
+idempotent). The set model is **CLOSED under every expression constructor** (v1.11.1 round 12): an
+Attribute / getattr / Subscript DISTRIBUTES over the union members then joins (`(math if c else os).system`
+→ {math.system, os.system}; a Subscript over a union of DIFFERENT-length sequences indexes each member
+separately so none is hidden), the Path constructor preserves self-file provenance through a subscript
+(`Path((__file__, x)[0]).write_text()`), an IfExp whose other arm is `__file__` no longer short-circuits to
+self-file and DROP the dangerous arm (`(os.system if c else __file__)(cmd)` fires), a for-target unions
+every element across all members, and a comprehension is an UNBOUNDED-length sequence (a constant index at
+any position yields its representative). What remains open here is a **comprehension loop-variable** (its own
+scope, not modeled — so `[g for g in (os.system,)][0]()` reads GREEN) and a **dict/set-literal subscript
+callee** (`{0: os.system}[0]()` — only list/tuple carry a positional seq), both the obfuscation tail; plus
+**cross-scope `nonlocal`**
 writes propagated up to an enclosing scope,
 **return-value modeling** (`importlib.import_module("os").system`, `functools.partial(os.system)`),
 two **capture-mask edges** (a use INSIDE an `except`/`case` block AFTER an in-body reassignment of the

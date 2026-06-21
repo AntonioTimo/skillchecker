@@ -276,3 +276,46 @@ def subscript_var_index_danger(cmd):
 def ternary_cross_rule(x, c):
     import pickle
     (os.system if c else pickle.loads)(x)
+
+
+# --- set-model CLOSURE under expression constructors (Codex reject 2 + workflow re-sweep): a union must
+#     survive an Attribute / getattr / Subscript / for-target / comprehension / __file__-ternary on top. ---
+
+# 30. ATTRIBUTE over a union base — `(math if c else os).system(cmd)`: the constructor distributes over
+#     the members so the dangerous os.system is not lost behind the summary canon (Codex reject 2).
+def attr_over_union(cmd, c):
+    import math
+    (math if c else os).system(cmd)
+
+
+# 31. getattr over a union base — `getattr((math if c else os), "system")(cmd)` -> AST003.
+def getattr_over_union(cmd, c):
+    import math
+    getattr((math if c else os), "system")(cmd)
+
+
+# 32. SUBSCRIPT over a union of DIFFERENT-length sequences — the dangerous element at index 2 of the
+#     longer arm is not hidden by the summary seq (None when lengths disagree) (Codex reject 2).
+def subscript_difflen_union(cmd, c):
+    import math
+    ((math.sin,) if c else (math.cos, math.tan, os.system))[2](cmd)
+
+
+# 33. an IfExp whose OTHER arm is __file__ must NOT short-circuit to self-file and DROP the dangerous
+#     arm — `(os.system if c else __file__)(cmd)` -> AST003 (workflow re-sweep FN2, broad blast radius).
+def ternary_file_arm(cmd, c):
+    (os.system if c else __file__)(cmd)
+
+
+# 34. for-target over a union of DIFFERENT-length iterables — the loop var unions every element across
+#     ALL members, so os.system in the longer arm is reachable (workflow re-sweep FN3) -> AST003.
+def for_union_difflen(cmd, c):
+    import math
+    for fn in ((math.sin,) if c else (os.system, math.cos)):
+        fn(cmd)
+
+
+# 35. COMPREHENSION subscript at a constant index >= the representative length — a comprehension's length
+#     is UNKNOWN, so any index yields the (dangerous) representative (workflow re-sweep FN1) -> AST003.
+def comprehension_index(cmd, items):
+    [os.system for _ in items][3](cmd)

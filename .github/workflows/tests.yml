@@ -184,7 +184,16 @@ jobs:
                            ("(math.sin if c else os.system)(cmd)", "BENIGN arm FIRST cannot hide the dangerous member [Codex F1]"),
                            ("g(cmd)", "bound IfExp, benign arm first (g = math.sin if c else os.system) [Codex F1]"),
                            ("(math.sin, os.system)[1](cmd)", "literal-seq subscript HONORS the constant index [Codex F2]"),
-                           ("s[1](cmd)", "Name-bound seq const index selects the dangerous element [Codex F2]")]:
+                           ("s[1](cmd)", "Name-bound seq const index selects the dangerous element [Codex F2]"),
+                           # set-model CLOSURE under expression constructors (Codex reject 2 + workflow re-sweep):
+                           # the union must survive an Attribute / getattr / Subscript / __file__-ternary /
+                           # for-target / comprehension applied on top.
+                           ("(math if c else os).system(cmd)", "ATTRIBUTE over a union base distributes to os.system [Codex reject 2]"),
+                           ('getattr((math if c else os), "system")(cmd)', "getattr over a union base [Codex reject 2]"),
+                           ("(math.cos, math.tan, os.system))[2](cmd)", "SUBSCRIPT over a union of differing-length seqs [Codex reject 2]"),
+                           ("(os.system if c else __file__)(cmd)", "IfExp __file__ arm must NOT drop the dangerous arm [workflow FN2]"),
+                           ("fn(cmd)", "for-target over a union of differing-length iterables [workflow FN3]"),
+                           ("[os.system for _ in items][3](cmd)", "comprehension subscript at a const index >= rep length [workflow FN1]")]:
               if sub not in ast003:
                   missing.append(("AST003", sub + " — " + why))
           # CROSS-RULE union — `(os.system if c else pickle.loads)(x)` fires BOTH AST003 and AST004
@@ -691,6 +700,10 @@ jobs:
               # dangerous open / Path ctor (members-aware self-file resolution).
               ("AST009", '(math.sin if c else open)(__file__, "w")'),     # builtin open hidden in a union arm [set-model]
               ("AST009", "(math.cos if c else pathlib.Path)(__file__)"),  # Path ctor hidden in a union arm [set-model]
+              # closure under the subscript / Path-ctor constructors (Codex reject 2): __file__ reached
+              # through a subscript, and the Path ctor wrapping it, preserve self-file provenance.
+              ("AST009", 'open((__file__, "safe")[0], "w")'),            # __file__ via a literal-seq subscript [Codex reject 2]
+              ("AST009", 'Path((__file__, "x")[0])'),                    # Path ctor over a subscript of __file__ [Codex reject 2]
           ]
           for r, sub in locks:
               if sub not in snip(r):
@@ -802,6 +815,9 @@ jobs:
               ("AST011", "/srv/victim23"),                # scalar archive then UNCONDITIONAL rebind to seq-of-archives, indexed [R10]
               ("AST011", "/srv/victim24"),                # archive .extractall hidden in an IfExp arm — members-aware AST011 [set-model]
               ("AST011", "/srv/victim25"),                # archive .extractall selected by a literal-seq subscript [set-model]
+              ("AST011", "/srv/victim26"),                # IfExp __file__ arm must NOT drop the archive member [workflow FN2]
+              ("AST011", "/srv/victim27"),                # archive via a for-target union of differing-length iterables [workflow FN3]
+              ("AST011", "/srv/victim28"),                # archive via a comprehension subscript (unbounded length) [workflow FN1]
               ("HI026", "disregard all previous instructions"),
               ("AST010", "os.execv"),                     # process replacement
               ("AST011", "extractall"),                   # Zip-Slip

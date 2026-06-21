@@ -210,3 +210,25 @@ def var_subscript_benign_index(c):
     import math
     s = (os.system, math.sin)
     s[1](1)
+
+
+# --- constructor-closure FP guards (Codex reject 2 + workflow re-sweep): a benign value must stay GREEN
+#     through Attribute / comprehension / out-of-range constant index. ---
+
+def attr_over_benign_union(c):
+    # an attribute over a union of two benign bases -> GREEN (no dangerous member to distribute).
+    import math
+    (math if c else math).sin(1)
+
+
+def comprehension_benign_index(items):
+    # a comprehension of a BENIGN callable indexed at any constant -> GREEN (the rep is benign).
+    import math
+    [math.sin for _ in items][9](1)
+
+
+def tuple_out_of_range_dead(c):
+    # a LITERAL tuple has a KNOWN length, so a constant index past its end is a dead path (runtime
+    # IndexError) -> GREEN, even though os.system is an element (the [5] never selects it).
+    import os
+    (os.getcwd, os.system)[5](1)

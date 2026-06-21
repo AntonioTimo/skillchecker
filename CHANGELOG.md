@@ -89,6 +89,35 @@ backstop). Still no new rule IDs.
   alias), so the per-scope reset is authoritative everywhere; the genuine cross-scope global-rebind
   (`x=None; … global x; x=os.system; x(c)`) and `def`-then-`x=os.system` still fire.
 
+### Fixed — round-12: set-model CLOSURE under expression constructors (Codex reject 2 + re-sweep)
+
+Codex rejected round-11 again: the SET model was correct at the top level but NOT CLOSED under expression
+CONSTRUCTORS — a union was lost the moment an Attribute / getattr / Subscript was applied on top, because
+`_facts_of` / `eval_expr` read the SUMMARY of the base/value (`base.canon`, `v.seq`) instead of mapping
+over the members. So `(math if c else os).system(cmd)` read GREEN (the Attribute saw the summary canon
+None), a Subscript over a union of DIFFERENT-length sequences hid the dangerous element (the summary `seq`
+is None when lengths disagree), and `_self_target` did not consult the unified resolver for a subscript
+(`open((__file__, "safe")[0], "w")` read GREEN / a generic ME005).
+
+The fix makes every constructor a HOMOMORPHISM over the union — it distributes over `_vf_members` then
+joins: `_vf_attr` lifts attribute/getattr access (`(math if c else os).system` → the union {math.system,
+os.system}); `_subscript_union` indexes each member's positional seq (a constant index per member, an
+out-of-a-member's-range constant being that member's dead path); the Path constructor preserves self-file
+provenance (`Path((__file__, x)[0]).write_text()`); and `_self_target` reads the final `self_file` fact
+via `_facts_of`. An adversarial re-sweep then surfaced three more closure breaks, each fixed: (FN2, broad)
+`_is_own_file_target` recursed an IfExp with OR and, as a top short-circuit, collapsed the WHOLE ternary to
+self-file whenever EITHER arm was `__file__` — discarding the other arm — so `(os.system if c else
+__file__)(cmd)` / `(tarfile.open(p) if c else __file__).extractall()` read GREEN; self-file now lifts
+through the IfExp JOIN like every other domain. (FN3) the for-target bound the loop var from the scalar
+summary `it.seq`, so a union of differing-length iterables lost a member; it now unions every element
+across `_vf_members`. (FN1) a comprehension was modeled as a fixed length-1 representative, so a constant
+index ≥ 1 was wrongly a dead path; a new `seq_open` flag marks an UNBOUNDED-length sequence (a
+comprehension) whose subscript at ANY index yields the representative. Golden byte-identical on the existing
+23 fixtures; no new rule IDs. The closure was validated by a constructor-closure matrix (Attribute /
+getattr / Subscript / Path-ctor / IfExp-with-`__file__`-arm / for-target / comprehension over a union,
+nested and across all four domains, plus a self-file regression battery). Remaining OOS unchanged
+(value-flow / interproc; comprehension loop-variable scope; dict/set-literal subscript callee).
+
 ### Fixed — round-11: SET-valued union resolution (Codex reject of the round-10 `a or b` collapse)
 
 Codex rejected the round-10 union handling: a callee that denotes a SET of possible callables — an

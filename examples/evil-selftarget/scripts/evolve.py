@@ -273,6 +273,18 @@ def evolve_union_pathctor(c):
     (math.cos if c else pathlib.Path)(__file__).write_text("# union-pathctor self-rewrite\n")
 
 
+def evolve_self_via_subscript():
+    # __file__ reached through a literal-sequence SUBSCRIPT — `open((__file__, "safe")[0], "w")`; the
+    # self-file fact propagates through the subscript constructor (Codex reject 2 closure) -> AST009.
+    open((__file__, "safe")[0], "w").write("# subscript self-rewrite\n")
+
+
+def evolve_self_via_pathctor_subscript():
+    # __file__ wrapped by the Path ctor over a subscript — `Path((__file__, "x")[0]).write_text()`; the
+    # Path constructor preserves self-file provenance reached through the subscript -> AST009.
+    Path((__file__, "x")[0]).write_text("# pathctor-subscript self-rewrite\n")
+
+
 if __name__ == "__main__":
     evolve()
     evolve_except_after()
