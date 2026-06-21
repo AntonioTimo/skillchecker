@@ -3378,6 +3378,17 @@ class _AstAuditor(ast.NodeVisitor):
         return refs
 
     def _method_ref_at(self, name_node):
+        """Differential wrapper (round-9): old impl + log divergence vs the _facts_at reader."""
+        r = self._method_ref_at_impl(name_node)
+        if self._diff is not None and len(self.fact_scopes) == len(self.scopes):
+            pos = (getattr(name_node, "lineno", 0), getattr(name_node, "col_offset", 0))
+            f = self._facts_at(name_node.id, pos)
+            v = (f.mleaf, f.mrecv) if (f is not None and f.mleaf is not None) else None
+            if v != r:
+                self._diff.append(("mref", name_node.id, pos, r, v))
+        return r
+
+    def _method_ref_at_impl(self, name_node):
         """(leaf, receiver_is_archive) for a Name that holds a method reference AS OF its
         position (a later rebind to a non-ref does not leak back), or None."""
         pos = (getattr(name_node, "lineno", 0), getattr(name_node, "col_offset", 0))
@@ -3439,6 +3450,17 @@ class _AstAuditor(ast.NodeVisitor):
         return "other"
 
     def _name_archive_state(self, name_node):
+        """Differential wrapper (round-9): old impl + log divergence vs the _facts_at reader."""
+        r = self._name_archive_state_impl(name_node)
+        if self._diff is not None and len(self.fact_scopes) == len(self.scopes):
+            pos = (getattr(name_node, "lineno", 0), getattr(name_node, "col_offset", 0))
+            f = self._facts_at(name_node.id, pos)
+            v = "arch" if (f and f.archive) else ("seqarch" if (f and f.seq is not None and f.seq.archive) else "other")
+            if v != r:
+                self._diff.append(("arch", name_node.id, pos, r, v))
+        return r
+
+    def _name_archive_state_impl(self, name_node):
         """The 'arch'/'seqarch'/'other' state of a Name as of its position — the innermost
         scope that binds it decides (param shadow), resolving AS OF the use position."""
         pos = (getattr(name_node, "lineno", 0), getattr(name_node, "col_offset", 0))
@@ -3596,6 +3618,19 @@ class _AstAuditor(ast.NodeVisitor):
         return binds
 
     def _self_target(self, node) -> bool:
+        """Differential wrapper (round-9): old _self_target_impl + log divergence vs the new
+        _facts_at-based reader, when the diff is active at real resolution depth."""
+        r = self._self_target_impl(node)
+        if self._diff is not None and isinstance(node, ast.Name) \
+                and not _is_own_file_target(node, self._path_ctor_at) \
+                and len(self.fact_scopes) == len(self.scopes):
+            f = self._facts_at(node.id, (getattr(node, "lineno", 0), getattr(node, "col_offset", 0)))
+            v = bool(f and f.self_file)
+            if v != r:
+                self._diff.append(("self", node.id, (node.lineno, node.col_offset), r, v))
+        return r
+
+    def _self_target_impl(self, node) -> bool:
         """The skill's own running file: inline `__file__`/`Path(__file__)` (walrus
         unwrapped), OR a Name resolving to it. Resolution is per-scope and POSITION-AWARE:
         the innermost scope that binds the name decides via its most-recent binding AS OF
