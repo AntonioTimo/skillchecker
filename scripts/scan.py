@@ -2649,30 +2649,15 @@ class _AstAuditor(ast.NodeVisitor):
         self.import_from = import_from or {}        # `from shutil import x` -> x: shutil.x
         self.star_modules = star_modules or set()   # `from shutil import *` -> {shutil}
         self.assign_aliases = assign_aliases or {}  # `mv = os.replace` -> mv: os.replace
-        self.method_scopes = []   # stack: name -> method-leaf (ex = t.extractall; getattr…)
-        # Stack of (file_names, bound_names) per lexical scope. PER-SCOPE (not the old
-        # global set, which leaked cross-function — Codex r1). `file_names` are names
-        # bound to __file__/Path(__file__) in this scope (walrus / tuple-unpack /
-        # transitive `q = p` included — Codex r3); `bound_names` is EVERY name bound here
-        # (params + non-file assigns), so an inner binding MASKS an outer __file__ binding
-        # of the same name (lexical resolution: a sibling fn's `src` param must not fire).
-        self.scopes = []
-        # Stack of per-scope POSITION-AWARE timelines (pushed in lockstep with self.scopes):
-        #  archive_scopes: {name: [(pos, is_archive)]} for the AST011 receiver-provenance gate;
-        #  alias_scopes:   {name: [(pos, canonical)]} for within-scope callable/module aliases,
-        #  so _canon resolves a name AS OF the use position (round-4 audit flow-sensitivity).
-        self.archive_scopes = []
-        self.alias_scopes = []
         # capture_scopes: {name: [(mask_pos, restore_pos)]} per scope — the regions where a name is
         # an `except … as` / `match` CAPTURE (the caught exception / matched sub-value). _capture_
-        # masked consults this so a use INSIDE the block resolves to nothing (not a pre-block alias/
-        # __file__/archive/method-ref), while a use AFTER falls through to the normal timelines —
-        # block-scoped masking that does NOT poison _local_binding_scope (round-8 audit F1).
+        # masked consults this so a use INSIDE the block resolves to nothing, while a use AFTER falls
+        # through to the normal timeline — block-scoped masking (round-8 audit F1).
         self.capture_scopes = []
-        # round-9: the unified _VF timeline stack, pushed in lockstep with the four old timelines —
-        # built parallel and differential-checked (self._diff) before switching the resolvers to it.
+        # round-9: the UNIFIED _VF timeline stack — the single source of binding/resolution semantics
+        # (one eval_expr/bind_target builds {name: [(pos, _VF, cond)]}; every resolver reads it). It
+        # replaced the four old per-scope walkers (alias / __file__ / archive / method-ref).
         self.fact_scopes = []
-        self._diff = None           # when a list, _canon logs (pos, old, new) divergences for parity
         self.findings = []
 
     def _resolve_import(self, name):
@@ -2699,19 +2684,6 @@ class _AstAuditor(ast.NodeVisitor):
                 if cand in _STAR_RESOLVABLE or cand in _ARCHIVE_OPENERS:
                     return cand
         return name
-
-    def _local_binding_scope(self, head, pos):
-        """Index of the INNERMOST active scope that binds `head` AT OR BEFORE `pos` — a param
-        (at (0,0)), an assignment / for-target / AnnAssign / walrus at its position — or None if
-        `head` is not locally bound yet at `pos` (so it is the module import / a future rebind).
-        Drives the position-aware shadow decision uniformly across the alias / path-ctor /
-        method-ref resolvers (round-4 audit pass 5: a FUTURE rebind must not retroactively mask
-        an earlier import-use, and a param/for/AnnAssign must mask just like an assignment)."""
-        for i in range(len(self.scopes) - 1, -1, -1):
-            tl = self.scopes[i].get(head)
-            if tl and any(bp <= pos for bp, _k in tl):
-                return i
-        return None
 
     def _path_ctor_at(self, func_node) -> bool:
         """True if a call's func resolves to the pathlib.Path CONSTRUCTOR as of its position — via
@@ -2965,9 +2937,9 @@ class _AstAuditor(ast.NodeVisitor):
         return facts
 
     def _facts_at(self, name, pos):
-        """The _VF for `name` AS OF pos — the innermost fact-scope that binds it (cross-scope, like
-        _local_binding_scope), masked block-scoped by the capture overlay. _VF() (opaque) if
-        captured-not-rebound; None if not bound in any active scope (caller resolves via imports)."""
+        """The _VF for `name` AS OF pos — the innermost fact-scope that binds it (cross-scope),
+        masked block-scoped by the capture overlay. _VF() (opaque) if captured-not-rebound; None if
+        not bound in any active scope (the caller then resolves via the import maps)."""
         if self._capture_masked(name, pos):
             return _VF()
         for binds in reversed(self.fact_scopes):
@@ -2975,399 +2947,6 @@ class _AstAuditor(ast.NodeVisitor):
             if r is not None:
                 return r
         return None
-
-    def _canon_v(self, name, pos):
-        """NEW canonical resolver over the unified _VF timeline (round-9), structurally mirroring
-        _canon_impl but reading fact_scopes: the innermost fact-scope binding the head decides; an
-        outer-scope non-alias falls through to the SAME flow-insensitive global map (assign_aliases /
-        imports) — so the cross-scope global-rebind (`global run; run=os.system`) still resolves."""
-        head, dot, rest = name.partition(".")
-        if self._capture_masked(head, pos):
-            return None
-        i, f = None, None
-        for idx in range(len(self.fact_scopes) - 1, -1, -1):
-            r = _resolve_tl(self.fact_scopes[idx].get(head, ()), pos)
-            if r is not None:
-                i, f = idx, r
-                break
-        if i is None:
-            return self._resolve_import(name)        # not locally bound -> import maps (not global)
-        if f.canon:
-            return f.canon + ("." + rest if dot else "")
-        if i == len(self.fact_scopes) - 1:
-            return None                              # innermost non-alias shadow -> masks
-        if name in self.assign_aliases:              # outer-scope non-alias -> global fallback
-            return self.assign_aliases[name]
-        if self._shadowed(head):
-            return name
-        if name in self.import_from:
-            return self.import_from[name]
-        if dot and head in self.import_modules:
-            return self.import_modules[head] + "." + rest
-        if dot and head in self.assign_aliases:
-            return self.assign_aliases[head] + "." + rest
-        return self._resolve_import(name)
-
-    def _scope_alias_bindings(self, scope_node, param_names=()):
-        """{name: [((lineno,col), canonical_or_None), …]} in source order — a POSITION-AWARE
-        per-scope timeline of callable/module assignment aliases: `mv = os.replace`, `a = os`,
-        `o = getattr(builtins,"open")`, transitive `b = a` (resolved at the binding position
-        through the import maps + this scope's earlier aliases). A non-alias assignment records
-        `None` (so the name MASKS a module import of the same name). A PARAM is seeded as None at
-        (0,0) so it masks too — this builder runs BEFORE self.scopes exists, so the assignment-path
-        resolver could not otherwise see a param shadow (`def f(getattr): fn = getattr(os,"system")`
-        / `def f(os): os.replace(...)`), unlike the inline path via _canon (round-8 re-sweep). NOT
-        into nested scopes."""
-        binds = {}
-        NE = getattr(ast, "NamedExpr", None)
-
-        def add(name, pos, canon):
-            binds.setdefault(name, []).append((pos, canon))
-
-        for p in param_names:
-            add(p, (0, 0), None)                                 # a param MASKS a module import / alias
-
-        def at(name, pos):
-            c = None
-            for bp, cn in binds.get(name, ()):
-                if bp <= pos:
-                    c = cn
-            return c
-
-        def head_canon_at(head, pos):
-            # the dotted-head canonical AS OF pos, DISTINGUISHING a within-scope bind (None ->
-            # definitively shadowed) from 'unbound' (-> the import/builtin) — so a shadowed
-            # getattr does not dispatch while the bare builtin / a `builtins.getattr` alias does.
-            bound, c = False, None
-            for bp, cn in binds.get(head, ()):
-                if bp <= pos:
-                    bound, c = True, cn
-            return c if bound else self._resolve_import(head)
-
-        def head_is_capture(head, pos):
-            # `head` is a live except/match CAPTURE at pos (the caught exception / matched value),
-            # UNLESS a later in-body rebind in THIS alias timeline (`binds`) supersedes it. Keys on
-            # the HEAD name and yields to an in-handler rebind, using the LOCAL `binds` so it is valid
-            # DURING construction (round-8 re-sweep H1/H2: the old _head_captured matched the whole
-            # dotted string and ignored a superseding rebind).
-            for mp, rp in (self.capture_scopes[-1].get(head, ()) if self.capture_scopes else ()):
-                if mp <= pos < rp and not any(mp < bp <= pos for bp, _c in binds.get(head, ())):
-                    return True
-            return False
-
-        def resolve(value, pos):
-            if isinstance(value, ast.Call) and len(value.args) >= 2 \
-                    and isinstance(value.args[1], ast.Constant) and isinstance(value.args[1].value, str):
-                gfunc = value.func
-                while NE is not None and isinstance(gfunc, NE):  # `(h := (g := getattr))(...)` —
-                    gfunc = gfunc.value                          # unwrap NESTED walruses (re-sweep H3)
-                gh = _dotted_name(gfunc)                         # `o = getattr(<base>, "<literal>")`:
-                ghead, gdot, grest = gh.partition(".") if gh else ("", "", "")
-                if ghead and not head_is_capture(ghead, pos):   # the HEAD (not the whole dotted) must
-                    gc = head_canon_at(ghead, pos)              # not be a live capture; dispatch ONLY
-                    if gc and gdot:                             # when it resolves (shadow-safe) to the
-                        gc = gc + "." + grest                   # BUILTIN getattr (`builtins.getattr` /
-                    if gc in ("getattr", "builtins.getattr"):   # an alias / a walrus head all resolve).
-                        bl = resolve(value.args[0], pos)
-                        return bl + "." + value.args[1].value if bl else None
-            dn = _dotted_name(value)
-            if not dn:
-                return None
-            head, dot, rest = dn.partition(".")
-            if head_is_capture(head, pos):                       # `except E as os: fn = os.system` —
-                return None                                      # os is the caught exception, not the
-            bound, lc = False, None                              # module (round-8 re-sweep H5: the
-            for bp, cn in binds.get(head, ()):                   # capture check applied only to the
-                if bp <= pos:                                    # getattr head, not the general head/
-                    bound, lc = True, cn                         # base). distinguish a within-scope bind
-            if bound:                                            # (None -> shadowed: param / non-alias
-                return (lc + "." + rest if dot else lc) if lc else None  # assign / for) from UNBOUND ->
-            return self._resolve_import(dn)                      # the import / transitive alias.
-
-        def seq_alias(value, pos):
-            # a for-target over a LITERAL sequence holding a callable alias resolves to it,
-            # mirroring is_seqarch for archives (`for f in [os.system]: f(cmd)` -> f is os.system);
-            # an opaque iterable (a Name / call) yields None so the for-target RESETS — so the #3
-            # benign-reuse fix (`runner=os.system; for runner in items:`) is preserved (round-6 R6-2).
-            elts = None
-            if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
-                elts = value.elts
-            elif isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-                elts = [value.elt]
-            for e in (elts or ()):
-                c = resolve(e, pos)
-                if c and "." in c:          # prefer a module-qualified canonical (the dangerous one)
-                    return c
-            return None
-
-        def add_target(target, value, pos):
-            # recursive matched-length tuple/list pairing (mirrors _scope_bindings.bind_target),
-            # so `runner, opts = os.system, {}` aliases runner -> os.system and `(a,(b,c)) =
-            # (1,(os.system,2))` aliases b; an unpairable target RESETS every bound name to None.
-            if isinstance(target, ast.Name):
-                add(target.id, pos, resolve(value, pos) if value is not None else None)
-            elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)) \
-                    and len(target.elts) == len(value.elts):
-                for t_el, v_el in zip(target.elts, value.elts):
-                    add_target(t_el, v_el, pos)
-            else:
-                for nm in _names_in_target(target):
-                    add(nm, pos, None)
-
-        def walk(node):
-            for n in ast.iter_child_nodes(node):
-                pos = (getattr(n, "lineno", 0), getattr(n, "col_offset", 0))
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    add(n.name, pos, None)         # def/class REBINDS its name here -> reset
-                    continue                       # its body is a nested scope (not recursed)
-                if isinstance(n, ast.Lambda):
-                    continue                       # anonymous — binds no name in this scope
-                # EVERY binding FORM that can (re)bind a name touches this timeline, in LOCK-STEP
-                # with _scope_bindings / _scope_method_refs / _scope_archive_names — an aliasing
-                # form sets a canonical, any other (re)bind RESETS to None so a prior alias does
-                # not leak past it. (round-6 sweep: checkered form-coverage across the 4 value-
-                # timelines was the disease — keep this branch set identical in all four.)
-                if NE is not None and isinstance(n, NE) and isinstance(n.target, ast.Name):
-                    add(n.target.id, pos, resolve(n.value, pos))
-                elif isinstance(n, ast.Assign):
-                    for tgt in n.targets:
-                        add_target(tgt, n.value, pos)
-                elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
-                    if n.value is not None:
-                        add(n.target.id, pos, resolve(n.value, pos))   # `mv: Callable = os.replace`
-                    # a BARE annotation `mv: object` does NOT rebind at runtime (verified mv is
-                    # os.system) -> NO-OP (preserve the prior binding), in lock-step with the
-                    # __file__ timeline (round-6 CONFIRM sweep: a reset here was an FN regression).
-                elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
-                    add(n.target.id, pos, None)            # `mv += x` -> no longer a clean alias
-                elif isinstance(n, (ast.For, ast.AsyncFor)):
-                    seqc = seq_alias(n.iter, pos) if isinstance(n.target, ast.Name) else None
-                    if seqc is not None:
-                        add(n.target.id, pos, seqc)        # `for f in [os.system]:` -> f is os.system
-                    else:
-                        for nm in _names_in_target(n.target):  # a for-loop variable is not an alias
-                            add(nm, pos, None)
-                elif isinstance(n, (ast.With, ast.AsyncWith)):
-                    for item in n.items:                   # `with X as name` rebinds name -> reset
-                        if item.optional_vars is not None:
-                            for nm in _names_in_target(item.optional_vars):
-                                add(nm, pos, None)
-                elif isinstance(n, (ast.Import, ast.ImportFrom)):
-                    for bnd, canon in _import_canon(n):    # `import os as run` / `from os import
-                        add(bnd, pos, self._resolve_import(canon))  # system as run` REBINDS the name
-                    # to a module/callable; the position-aware resolver must see it so a prior local
-                    # binding of the same name does not mask it (round-8 audit sibling-form D).
-                walk(n)
-        walk(scope_node)
-        return binds
-
-    @staticmethod
-    def _scope_bindings(scope_node, param_names=(), is_path_ctor=None, is_captured=None):
-        """POSITION-AWARE __file__ binding timeline for THIS scope (NOT into nested
-        function/class/lambda scopes). Returns `binds = {name: [(pos, kind), …]}` in
-        source order, pos = (lineno, col_offset), kind ∈ {'file','seqfile','other'}.
-        _self_target resolves a name AS OF a write call's POSITION (its most recent prior
-        binding), so `p=__file__; p.write(); p=None` fires (write while p IS __file__) and
-        `p=Path(__file__); p=p.with_name(x); p.write()` does not (rebound to a sibling BEFORE
-        the write). Position is (lineno, col) — NOT just lineno — so a same-LINE rebind
-        `p=Path(__file__); p.write(); p=None` does not mask the write either (round-4 audit).
-        A param (kind 'other' at pos (0,0)) masks an outer __file__ binding. 'seqfile' = bound
-        to a literal/comprehension sequence holding __file__ (`for p in paths` binds p 'file')."""
-        binds = {}
-        NE = getattr(ast, "NamedExpr", None)
-
-        def add(name, pos, kind):
-            binds.setdefault(name, []).append((pos, kind))
-
-        for p in param_names:
-            add(p, (0, 0), "other")
-
-        def latest(name, pos):
-            st = None
-            for bp, k in binds.get(name, ()):
-                if bp <= pos:
-                    st = k
-            return st
-
-        def seq_holds_file(value):
-            if isinstance(value, (ast.List, ast.Tuple)):
-                return any(_is_own_file_target(e, is_path_ctor) for e in value.elts)
-            if isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-                return _is_own_file_target(value.elt, is_path_ctor)
-            return False
-
-        def kind_of(value, lineno):
-            if _is_own_file_target(value, is_path_ctor):
-                return "file"
-            if isinstance(value, ast.Name) and latest(value.id, lineno) == "file" \
-                    and not (is_captured and is_captured(value.id, lineno)):
-                return "file"                      # transitive q = p (a captured p does NOT propagate)
-            if seq_holds_file(value):
-                return "seqfile"
-            return "other"
-
-        def bind_target(target, value, lineno):
-            if isinstance(target, ast.Name):
-                add(target.id, lineno, kind_of(value, lineno))
-            elif isinstance(target, (ast.Tuple, ast.List)):
-                if isinstance(value, (ast.Tuple, ast.List)) and len(target.elts) == len(value.elts):
-                    for t_el, v_el in zip(target.elts, value.elts):
-                        bind_target(t_el, v_el, lineno)
-                else:
-                    for nm in _names_in_target(target):
-                        add(nm, lineno, "other")
-            else:
-                for nm in _names_in_target(target):
-                    add(nm, lineno, "other")
-
-        def walk(node):
-            for n in ast.iter_child_nodes(node):
-                ln = (getattr(n, "lineno", 0), getattr(n, "col_offset", 0))
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    add(n.name, ln, "other")       # def/class REBINDS its name here -> reset
-                    continue                       # a nested scope owns its own bindings
-                if isinstance(n, ast.Lambda):
-                    continue                       # anonymous — binds no name in this scope
-                if NE is not None and isinstance(n, NE) and isinstance(n.target, ast.Name):
-                    bind_target(n.target, n.value, ln)
-                elif isinstance(n, ast.Assign):
-                    for tgt in n.targets:
-                        bind_target(tgt, n.value, ln)
-                elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
-                    bind_target(n.target, n.value if n.value is not None else n.target, ln)
-                elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
-                    add(n.target.id, ln, "other")
-                elif isinstance(n, (ast.For, ast.AsyncFor)):
-                    if isinstance(n.target, ast.Name):
-                        it = n.iter
-                        holds = seq_holds_file(it) or (isinstance(it, ast.Name) and latest(it.id, ln) == "seqfile")
-                        add(n.target.id, ln, "file" if holds else "other")
-                    else:
-                        for nm in _names_in_target(n.target):
-                            add(nm, ln, "other")
-                elif isinstance(n, (ast.With, ast.AsyncWith)):
-                    for item in n.items:           # `with X as name` rebinds name -> reset (not __file__)
-                        if item.optional_vars is not None:
-                            for nm in _names_in_target(item.optional_vars):
-                                add(nm, ln, "other")
-                elif isinstance(n, (ast.Import, ast.ImportFrom)):
-                    for bnd, _c in _import_canon(n):       # an import REBINDS the name to a module,
-                        add(bnd, ln, "other")              # never this skill's __file__ (sibling D).
-                walk(n)                            # recurse in source order
-        walk(scope_node)
-        return binds
-
-    def _scope_method_refs(self, scope_node):
-        """{name: [(pos, method-leaf-or-None, receiver_is_archive), …]} — a POSITION-AWARE
-        timeline of a method REFERENCE bound in THIS scope: `ex = t.extractall`, `fn =
-        getattr(t, "extractall")`, a transitive `b = a`, a tuple-unpack, or a walrus. A rebind
-        to a NON-ref records leaf=None (so `ex = a.extractall; ex(); ex = safe` does not flag
-        the LATER non-ref use, and a safe `ex()` BEFORE a later `ex = a.extractall` does not
-        flag — round-4 audit pass 3 final-state-map FN/FP). `receiver_is_archive` is resolved
-        AT the binding position. NOT into nested scopes; relies on this scope's archive set
-        already on self.archive_scopes."""
-        refs = {}
-        NE = getattr(ast, "NamedExpr", None)
-
-        def ref_at(name, pos):
-            leaf, recv = None, False
-            for bp, lf, rc in refs.get(name, ()):
-                if bp <= pos:
-                    leaf, recv = lf, rc
-            return (leaf, recv) if leaf is not None else None
-
-        def ref_info(value, pos):
-            if NE is not None and isinstance(value, NE):
-                return ref_info(value.value, pos)
-            if isinstance(value, ast.Attribute):
-                return (value.attr, self._is_archive_expr(value.value))
-            if isinstance(value, ast.Call) and len(value.args) >= 2 \
-                    and isinstance(value.args[1], ast.Constant) and isinstance(value.args[1].value, str) \
-                    and self._func_canon(value.func, pos) in ("getattr", "builtins.getattr"):
-                # `fn = getattr(t, "extractall")` — builtins.getattr / an alias / a walrus head all
-                # resolve through _func_canon (shadow-safe + walrus-unwrap; method refs build after
-                # alias_scopes), round-8 audit + re-sweep.
-                return (value.args[1].value, self._is_archive_expr(value.args[0]))
-            if isinstance(value, ast.Name):
-                if self._capture_masked(value.id, pos):    # a LIVE captured `ex` does NOT propagate its
-                    return None                            # method-ref to `f = ex`; a captured name
-                return ref_at(value.id, pos)       # rebound to a real ref DOES (round-8 re-sweep H6/H7)
-            return None
-
-        def bind(name, pos, value):
-            info = ref_info(value, pos)
-            refs.setdefault(name, []).append((pos, info[0] if info else None, info[1] if info else False))
-
-        def reset(name, pos):
-            refs.setdefault(name, []).append((pos, None, False))   # a non-ref rebind clears the ref
-
-        def seq_ref(value, pos):
-            # a for-target over a LITERAL sequence holding a method-ref resolves to it, mirroring
-            # is_seqarch (`for ex in [t.extractall]: ex()`); an opaque iterable yields None -> reset.
-            elts = None
-            if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
-                elts = value.elts
-            elif isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-                elts = [value.elt]
-            for e in (elts or ()):
-                info = ref_info(e, pos)
-                if info:
-                    return info
-            return None
-
-        def bind_target(target, value, pos):
-            # recursive matched-length tuple/list pairing (mirrors _scope_bindings.bind_target):
-            # `ex, _ = t.extractall, 0` and nested `(a,(ex,c)) = (1,(t.extractall,2))` both bind ex;
-            # an unpairable target RESETS every bound name (no ref).
-            if isinstance(target, ast.Name):
-                bind(target.id, pos, value)
-            elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)) \
-                    and len(target.elts) == len(value.elts):
-                for t_el, v_el in zip(target.elts, value.elts):
-                    bind_target(t_el, v_el, pos)
-            else:
-                for nm in _names_in_target(target):
-                    reset(nm, pos)
-
-        def walk(node):
-            for n in ast.iter_child_nodes(node):
-                pos = (getattr(n, "lineno", 0), getattr(n, "col_offset", 0))
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    reset(n.name, pos)             # def/class REBINDS its name here -> reset
-                    continue
-                if isinstance(n, ast.Lambda):
-                    continue                       # anonymous — binds no name in this scope
-                # branch set kept in LOCK-STEP with the other three value-timelines (round-6 sweep).
-                if NE is not None and isinstance(n, NE) and isinstance(n.target, ast.Name):
-                    bind(n.target.id, pos, n.value)
-                elif isinstance(n, ast.Assign):
-                    for tgt in n.targets:
-                        bind_target(tgt, n.value, pos)
-                elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
-                    if n.value is not None:
-                        bind(n.target.id, pos, n.value)        # `ex: Callable = t.extractall`
-                    # bare `ex: object` does NOT rebind at runtime -> NO-OP (preserve), lock-step
-                    # with __file__ (round-6 CONFIRM sweep C24: a reset here was an AST011 FN regression).
-                elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
-                    reset(n.target.id, pos)
-                elif isinstance(n, (ast.For, ast.AsyncFor)):
-                    info = seq_ref(n.iter, pos) if isinstance(n.target, ast.Name) else None
-                    if info is not None:
-                        refs.setdefault(n.target.id, []).append((pos, info[0], info[1]))
-                    else:
-                        for nm in _names_in_target(n.target):   # for-loop var is not a method-ref
-                            reset(nm, pos)
-                elif isinstance(n, (ast.With, ast.AsyncWith)):
-                    for item in n.items:                        # `with X as name` rebinds -> reset
-                        if item.optional_vars is not None:
-                            for nm in _names_in_target(item.optional_vars):
-                                reset(nm, pos)
-                elif isinstance(n, (ast.Import, ast.ImportFrom)):
-                    for bnd, _c in _import_canon(n):            # an import REBINDS to a module, not a
-                        reset(bnd, pos)                         # method reference (sibling D).
-                walk(n)
-        walk(scope_node)
-        return refs
 
     def _method_ref_at(self, name_node):
         """(leaf, receiver_is_archive) for a Name holding a method reference AS OF its position over
@@ -3389,34 +2968,6 @@ class _AstAuditor(ast.NodeVisitor):
             info = self._method_ref_at(func)
             return info[0] if info else None
         return None
-
-    @staticmethod
-    def _archive_state(timeline, pos):
-        """The state of a name AS OF `pos` from its archive timeline of (pos, kind, cond),
-        kind in {'arch','seqarch','other'}: returns 'arch' / 'seqarch' / 'other'. A 'other'
-        (non-archive) rebind masks an earlier 'arch'/'seqarch' ONLY when it is UNCONDITIONAL
-        (cond=False, a top-level statement) — a rebind in a sibling try/except/if branch does
-        NOT mask the live archive on the other path (round-4 audit pass 3 #4)."""
-        last_arch = last_seq = None
-        for bp, kind, _cond in timeline:
-            if bp <= pos:
-                if kind == "arch":
-                    last_arch = bp
-                elif kind == "seqarch":
-                    last_seq = bp
-
-        def live(last):
-            if last is None:
-                return False
-            for bp, kind, cond in timeline:
-                if kind == "other" and not cond and last < bp <= pos:
-                    return False
-            return True
-        if live(last_arch):
-            return "arch"
-        if live(last_seq):
-            return "seqarch"
-        return "other"
 
     def _name_archive_state(self, name_node):
         """The 'arch'/'seqarch'/'other' state of a Name as of its position over the unified _VF
@@ -3462,115 +3013,6 @@ class _AstAuditor(ast.NodeVisitor):
             info = self._method_ref_at(func)
             return info[1] if info else False
         return False
-
-    def _scope_archive_names(self, scope_node):
-        """{name: [(pos, kind, cond), …]} per-scope timeline. kind in {'arch','seqarch',
-        'other'}: 'arch' = a tarfile/zipfile archive object (opener Call / with-as / IfExp arm
-        / transitive); 'seqarch' = a sequence HOLDING an opener (so `for x in <seqarch>` binds x
-        'arch', and `<seqarch>[i]` is an archive). `cond` marks a binding inside a conditional
-        sub-block. _archive_state resolves a name AS OF a use position: an UNCONDITIONAL non-
-        archive rebind masks an earlier archive; a sibling try/except/if-branch rebind does NOT
-        (round-4 audit pass 3 #3/#4/#5: a live archive on one path stays detected). NOT into
-        nested function/class/lambda scopes."""
-        binds = {}
-        NE = getattr(ast, "NamedExpr", None)
-
-        def add(name, pos, kind, cond):
-            binds.setdefault(name, []).append((pos, kind, cond))
-
-        def state(name, pos):
-            return self._archive_state(binds.get(name, ()), pos)
-
-        def is_opener(value):
-            return isinstance(value, ast.Call) \
-                and self._func_canon(value.func,
-                                (getattr(value.func, "lineno", 0), getattr(value.func, "col_offset", 0))) in _ARCHIVE_OPENERS
-
-        def is_arch(value, pos):
-            if NE is not None and isinstance(value, NE):
-                return is_arch(value.value, pos)
-            if is_opener(value):
-                return True
-            if isinstance(value, ast.IfExp):
-                return is_arch(value.body, pos) or is_arch(value.orelse, pos)
-            if isinstance(value, ast.Name):
-                return state(value.id, pos) == "arch" and not self._capture_masked(value.id, pos)  # b = a
-            return False
-
-        def is_seqarch(value, pos):
-            if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
-                return any(is_arch(e, pos) for e in value.elts)
-            if isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-                return is_arch(value.elt, pos)
-            if isinstance(value, ast.Name):
-                return state(value.id, pos) == "seqarch" and not self._capture_masked(value.id, pos)
-            return False
-
-        def kind_of(value, pos):
-            if is_arch(value, pos):
-                return "arch"
-            if is_seqarch(value, pos):
-                return "seqarch"
-            return "other"
-
-        def bind_target(target, value, pos, cond):
-            # recursive matched-length tuple/list pairing (mirrors _scope_bindings.bind_target):
-            # `t, _ = tarfile.open(p), 0` records t 'arch'; an unpairable target RESETS to 'other'.
-            if isinstance(target, ast.Name):
-                add(target.id, pos, kind_of(value, pos), cond)
-            elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)) \
-                    and len(target.elts) == len(value.elts):
-                for t_el, v_el in zip(target.elts, value.elts):
-                    bind_target(t_el, v_el, pos, cond)
-            else:
-                for nm in _names_in_target(target):
-                    add(nm, pos, "other", cond)
-
-        def walk(node, cond):
-            for n in ast.iter_child_nodes(node):
-                pos = (getattr(n, "lineno", 0), getattr(n, "col_offset", 0))
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    add(n.name, pos, "other", cond)  # def/class REBINDS its name here -> reset
-                    continue
-                if isinstance(n, ast.Lambda):
-                    continue                         # anonymous — binds no name in this scope
-                if isinstance(n, (ast.With, ast.AsyncWith)):
-                    for item in n.items:
-                        ov = item.optional_vars
-                        if isinstance(ov, ast.Name):
-                            add(ov.id, pos, "arch" if is_opener(item.context_expr) else "other", cond)
-                if NE is not None and isinstance(n, NE) and isinstance(n.target, ast.Name):
-                    add(n.target.id, pos, kind_of(n.value, pos), cond)
-                elif isinstance(n, ast.Assign):
-                    for tgt in n.targets:
-                        bind_target(tgt, n.value, pos, cond)
-                elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
-                    # `arch: T = tarfile.open(p)` records 'arch'; `arch: object = None` records the
-                    # non-archive value (resets). A BARE `arch: object` (no value) is a NO-OP that
-                    # preserves the prior provenance — lock-step with __file__ (round-6 CONFIRM sweep
-                    # C23: a reset on a bare annotation was an AST011 FN regression).
-                    if n.value is not None:
-                        add(n.target.id, pos, kind_of(n.value, pos), cond)
-                elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
-                    add(n.target.id, pos, "other", cond)       # `t += x` -> not a provable archive (FP-3)
-                elif isinstance(n, (ast.For, ast.AsyncFor)):
-                    # a for-target over a seqarch is 'arch'; otherwise it RESETS with the LIVE cond —
-                    # a top-level (unconditional) for-rebind masks an earlier archive, mirroring the
-                    # #3 for-reset in the other three timelines (sweep FP-1; was hardcoded cond=True,
-                    # so a top-level for never masked and leaked stale provenance).
-                    if isinstance(n.target, ast.Name):
-                        add(n.target.id, pos, "arch" if is_seqarch(n.iter, pos) else "other", cond)
-                    else:
-                        for nm in _names_in_target(n.target):
-                            add(nm, pos, "other", cond)
-                elif isinstance(n, (ast.Import, ast.ImportFrom)):
-                    for bnd, _c in _import_canon(n):    # an import REBINDS to a MODULE (not an opened
-                        add(bnd, pos, "other", cond)    # archive object) -> reset provenance (sibling D).
-                child_cond = cond or isinstance(n, (ast.If, ast.For, ast.AsyncFor, ast.While,
-                                                    ast.Try, ast.With, ast.AsyncWith))
-                walk(n, child_cond)
-        walk(scope_node, False)
-        return binds
 
     def _self_target(self, node) -> bool:
         """The skill's own running file: inline `__file__`/`Path(__file__)` (walrus unwrapped), OR a
@@ -3769,9 +3211,6 @@ class _AstAuditor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-_DIFF_SINK = None   # round-9 migration: set to a list to collect old-vs-new resolver divergences
-
-
 def ast_scan(path: Path, rel: str) -> list[Finding]:
     """AST pass for a single .py file. Parses with ast.parse (never executes);
     degrades to a no-op if the source will not parse."""
@@ -3876,11 +3315,10 @@ def ast_scan(path: Path, rel: str) -> list[Finding]:
                                                  # was overridden cross-scope by this fallback -> a
                                                  # benign dispatch module read AST003/RED).
 
-    # Pass 2 — detect. (The aliased pathlib.Path constructor is resolved POSITION-AWARELY by
-    # the auditor's _path_ctor_at via the per-scope alias timeline, not a global set.)
+    # Pass 2 — detect. The unified _VF evaluator (round-9) resolves every binding/alias/provenance
+    # position-awarely via fact_scopes; the aliased pathlib.Path ctor included.
     auditor = _AstAuditor(rel, text, alias, open_aliases, import_modules, import_from,
                           star_modules, assign_aliases)
-    auditor._diff = _DIFF_SINK            # round-9: collect old-vs-new resolver divergences (dev)
     auditor.visit(tree)
     return auditor.findings
 
