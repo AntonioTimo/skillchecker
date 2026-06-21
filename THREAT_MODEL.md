@@ -205,7 +205,8 @@ closed), a literal subscript HONORS its constant index (incl. negative — `(a, 
 through a Name-bound sequence), a dynamic index is CONSERVATIVE (fires if ANY element is dangerous — a
 possible FP, never an FN), and a cross-rule union fires EVERY member's rule (`(os.system if c else
 pickle.loads)(x)` → both AST003 and AST004), order-independent (the join is commutative / associative /
-idempotent). The set model is **CLOSED under every expression constructor** (v1.11.1 round 12): an
+idempotent — its deduplication keys a nested union by its member SET, so even a union nested inside a
+sequence `((a if … else b),)` retains every member regardless of arm order — v1.11.1 round 13). The set model is **CLOSED under every expression constructor** (v1.11.1 round 12): an
 Attribute / getattr / Subscript DISTRIBUTES over the union members then joins (`(math if c else os).system`
 → {math.system, os.system}; a Subscript over a union of DIFFERENT-length sequences indexes each member
 separately so none is hidden), the Path constructor preserves self-file provenance through a subscript

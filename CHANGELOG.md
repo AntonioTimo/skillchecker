@@ -89,6 +89,18 @@ backstop). Still no new rule IDs.
   alias), so the per-scope reset is authoritative everywhere; the genuine cross-scope global-rebind
   (`x=None; … global x; x=os.system; x(c)`) and `def`-then-`x=os.system` still fire.
 
+### Fixed — round-13: nested-union dedup key (Codex reject 3)
+
+Codex found the one remaining hole in the set model's commutativity: `_vf_dedup_key` (which `_vf_join`
+uses to deduplicate union members) recursed into a `_VF`'s positional `seq` elements but NOT into a nested
+union's `members`. A `seq` element can itself be a union (`((x if a else y),)`), and two DIFFERENT inner
+unions both summarize to `canon=None`, so their keys collided and `_vf_join` dropped one — so
+`((math.sin if a else os.system),) if b else ((math.cos if c else pickle.loads),)` indexed `[0]` fired only
+the first arm's rule, and swapping the arms changed the result (`AST003` ↔ `AST004`, non-commutative). The
+key now includes the nested `members` as an order-independent FROZENSET, so a union-in-a-sequence retains
+every member and arm/grouping order is immaterial (commutativity / associativity hold for nested unions
+too). One-line change; golden byte-identical on the existing 23 fixtures; no new rule IDs.
+
 ### Fixed — round-12: set-model CLOSURE under expression constructors (Codex reject 2 + re-sweep)
 
 Codex rejected round-11 again: the SET model was correct at the top level but NOT CLOSED under expression

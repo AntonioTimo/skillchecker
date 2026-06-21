@@ -2438,9 +2438,15 @@ def _seq_has_archive(seq):
 
 
 def _vf_dedup_key(vf):
-    """A hashable identity for a point _VF, so `_vf_join` deduplicates members (idempotence)."""
+    """A hashable identity for a _VF, so `_vf_join` deduplicates members (idempotence). MUST recurse
+    into BOTH the positional `seq` elements AND a nested union's `members` — a `seq` element can itself
+    be a union (`((x if a else y),)`), and two DIFFERENT such unions both summarize to canon=None, so
+    omitting `members` collided them and `_vf_join` dropped one (Codex: a union-in-sequence lost a
+    member and arm order changed findings). `members` is keyed as a FROZENSET (order-independent), so
+    swapping a nested IfExp's arms yields the SAME key — the join stays commutative / associative."""
     return (vf.canon, vf.self_file, vf.archive, vf.mleaf, vf.mrecv, vf.seq_open,
-            tuple(_vf_dedup_key(e) for e in vf.seq) if vf.seq is not None else None)
+            tuple(_vf_dedup_key(e) for e in vf.seq) if vf.seq is not None else None,
+            frozenset(_vf_dedup_key(m) for m in vf.members) if vf.members is not None else None)
 
 
 def _vf_summary(ms):

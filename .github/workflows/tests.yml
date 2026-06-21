@@ -193,14 +193,19 @@ jobs:
                            ("(math.cos, math.tan, os.system))[2](cmd)", "SUBSCRIPT over a union of differing-length seqs [Codex reject 2]"),
                            ("(os.system if c else __file__)(cmd)", "IfExp __file__ arm must NOT drop the dangerous arm [workflow FN2]"),
                            ("fn(cmd)", "for-target over a union of differing-length iterables [workflow FN3]"),
-                           ("[os.system for _ in items][3](cmd)", "comprehension subscript at a const index >= rep length [workflow FN1]")]:
+                           ("[os.system for _ in items][3](cmd)", "comprehension subscript at a const index >= rep length [workflow FN1]"),
+                           ("fs[0](input())", "NESTED union-in-sequence — both arms preserved (dedup key includes members) [Codex reject 3]")]:
               if sub not in ast003:
                   missing.append(("AST003", sub + " — " + why))
           # CROSS-RULE union — `(os.system if c else pickle.loads)(x)` fires BOTH AST003 and AST004
-          # (commutative set — arm order is immaterial), proving the union enumerates ALL members.
+          # (commutative set — arm order is immaterial), proving the union enumerates ALL members. The
+          # NESTED union-in-seq `fs[0](input())` likewise fires AST004 (its inner union survived the
+          # dedup that would otherwise collide it with the sibling arm — Codex reject 3).
           ast004 = "\n".join(f["snippet"] for f in data["findings"] if f["rule_id"] == "AST004")
-          if "(os.system if c else pickle.loads)(x)" not in ast004:
-              missing.append(("AST004", "cross-rule union fires every member's rule [set-model commutativity]"))
+          for need, tag in [("(os.system if c else pickle.loads)(x)", "cross-rule union fires every member's rule [set-model commutativity]"),
+                            ("fs[0](input())", "nested union-in-seq retains both arms' rules [Codex reject 3]")]:
+              if need not in ast004:
+                  missing.append(("AST004", tag))
           if missing:
               print("::error::evil-ast missing expected catches:")
               for rule, why in missing:

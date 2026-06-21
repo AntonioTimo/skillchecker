@@ -319,3 +319,15 @@ def for_union_difflen(cmd, c):
 #     is UNKNOWN, so any index yields the (dangerous) representative (workflow re-sweep FN1) -> AST003.
 def comprehension_index(cmd, items):
     [os.system for _ in items][3](cmd)
+
+
+# 36. NESTED union inside a sequence — `((A if a else B),) if b else ((C if c else D),)` indexed [0]. The
+#     two tuple arms each hold a DIFFERENT inner union; both summarize to canon=None, so the dedup key
+#     MUST include each nested union's members (as an order-independent set) or `_vf_join` collides them
+#     and drops one arm (Codex reject 3). Fires AST003 (os.system) AND AST004 (pickle.loads), and arm
+#     order is immaterial (commutative).
+def nested_union_in_seq(a, b, c):
+    import math
+    import pickle
+    fs = ((math.sin if a else os.system),) if b else ((math.cos if c else pickle.loads),)
+    fs[0](input())
