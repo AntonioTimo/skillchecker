@@ -2358,6 +2358,41 @@ class _VF:
         self.seq = seq
 
 
+def _resolve_tl(tl, pos):
+    """Resolve a name's unified _VF timeline `[(pos, vf, cond)]` AS OF pos. `canon` / `self_file` /
+    `mleaf` / `mrecv` are last-write-wins (the four old non-archive timelines have no cond); `archive`
+    is COND-aware — a non-archive rebind masks an earlier archive ONLY when UNCONDITIONAL, so a
+    sibling try/except/if-branch rebind does not mask the live archive on the other path (round-4
+    audit pass 3 #4). Returns None if `name` is not bound at or before `pos`."""
+    last = None
+    for bp, vf, _c in tl:
+        if bp <= pos:
+            last = vf
+    if last is None:
+        return None
+    last_arch = last_seq = None
+    for bp, vf, _c in tl:
+        if bp <= pos:
+            if vf.archive:
+                last_arch = bp
+            elif vf.seq is not None and vf.seq.archive:
+                last_seq = bp
+
+    def live(last_bp):
+        if last_bp is None:
+            return False
+        for bp, vf, cond in tl:
+            other = (not vf.archive) and not (vf.seq is not None and vf.seq.archive)
+            if other and not cond and last_bp < bp <= pos:
+                return False
+        return True
+    arch = live(last_arch)
+    seqarch = (not arch) and live(last_seq)
+    seq = _VF(archive=True) if seqarch else (last.seq if (last.seq is not None and not last.seq.archive) else None)
+    return _VF(canon=last.canon, self_file=last.self_file, archive=arch,
+               mleaf=last.mleaf, mrecv=last.mrecv, seq=seq)
+
+
 def _names_in_target(target):
     """Yield every Name id an assignment target binds (Name, or nested Tuple/List/Starred)."""
     if isinstance(target, ast.Name):
@@ -2844,21 +2879,17 @@ class _AstAuditor(ast.NodeVisitor):
         facts = {}
         NE = getattr(ast, "NamedExpr", None)
 
-        def add(name, pos, vf):
-            facts.setdefault(name, []).append((pos, vf))
+        def add(name, pos, vf, cond=False):
+            facts.setdefault(name, []).append((pos, vf, cond))
 
         for p in param_names:
             add(p, (0, 0), _VF())          # a param masks (opaque)
 
         def local_at(name, pos):
             for mp, rp in (self.capture_scopes[-1].get(name, ()) if self.capture_scopes else ()):
-                if mp <= pos < rp and not any(mp < bp <= pos for bp, _f in facts.get(name, ())):
+                if mp <= pos < rp and not any(mp < bp <= pos for bp, _f, _c in facts.get(name, ())):
                     return _VF()           # a LIVE capture -> opaque (yields to an in-block rebind)
-            vf, bound = None, False
-            for bp, f in facts.get(name, ()):
-                if bp <= pos:
-                    bound, vf = True, f
-            return vf if bound else None
+            return _resolve_tl(facts.get(name, ()), pos)
 
         def is_getattr_call(node, pos):
             if not (isinstance(node, ast.Call) and len(node.args) >= 2
@@ -2912,55 +2943,57 @@ class _AstAuditor(ast.NodeVisitor):
                            canon=a.canon if a.canon == b.canon else None)
             return _VF()
 
-        def bind_target(target, value, pos):
+        def bind_target(target, value, pos, cond):
             if isinstance(target, ast.Name):
-                add(target.id, pos, eval_expr(value, pos) if value is not None else _VF())
+                add(target.id, pos, eval_expr(value, pos) if value is not None else _VF(), cond)
             elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)) \
                     and len(target.elts) == len(value.elts):
                 for t_el, v_el in zip(target.elts, value.elts):
-                    bind_target(t_el, v_el, pos)
+                    bind_target(t_el, v_el, pos, cond)
             else:
                 for nm in _names_in_target(target):
-                    add(nm, pos, _VF())
+                    add(nm, pos, _VF(), cond)
 
-        def walk(node):
+        def walk(node, cond):
             for n in ast.iter_child_nodes(node):
                 pos = (getattr(n, "lineno", 0), getattr(n, "col_offset", 0))
                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    add(n.name, pos, _VF())
+                    add(n.name, pos, _VF(), cond)
                     continue
                 if isinstance(n, ast.Lambda):
                     continue
                 if NE is not None and isinstance(n, NE) and isinstance(n.target, ast.Name):
-                    add(n.target.id, pos, eval_expr(n.value, pos))
+                    add(n.target.id, pos, eval_expr(n.value, pos), cond)
                 elif isinstance(n, ast.Assign):
                     for tgt in n.targets:
-                        bind_target(tgt, n.value, pos)
+                        bind_target(tgt, n.value, pos, cond)
                 elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
                     if n.value is not None:
-                        add(n.target.id, pos, eval_expr(n.value, pos))
+                        add(n.target.id, pos, eval_expr(n.value, pos), cond)
                 elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
-                    add(n.target.id, pos, _VF())
+                    add(n.target.id, pos, _VF(), cond)
                 elif isinstance(n, (ast.For, ast.AsyncFor)):
                     if isinstance(n.target, ast.Name):
                         it = eval_expr(n.iter, pos)
-                        add(n.target.id, pos, it.seq if it.seq is not None else _VF())
+                        add(n.target.id, pos, it.seq if it.seq is not None else _VF(), cond)
                     else:
                         for nm in _names_in_target(n.target):
-                            add(nm, pos, _VF())
+                            add(nm, pos, _VF(), cond)
                 elif isinstance(n, (ast.With, ast.AsyncWith)):
                     for item in n.items:
                         if item.optional_vars is not None:
                             if isinstance(item.optional_vars, ast.Name):
-                                add(item.optional_vars.id, pos, _VF(archive=eval_expr(item.context_expr, pos).archive))
+                                add(item.optional_vars.id, pos, _VF(archive=eval_expr(item.context_expr, pos).archive), cond)
                             else:
                                 for nm in _names_in_target(item.optional_vars):
-                                    add(nm, pos, _VF())
+                                    add(nm, pos, _VF(), cond)
                 elif isinstance(n, (ast.Import, ast.ImportFrom)):
                     for bnd, canon in _import_canon(n):
-                        add(bnd, pos, _VF(canon=self._resolve_import(canon)) if canon else _VF())
-                walk(n)
-        walk(scope_node)
+                        add(bnd, pos, _VF(canon=self._resolve_import(canon)) if canon else _VF(), cond)
+                child_cond = cond or isinstance(n, (ast.If, ast.For, ast.AsyncFor, ast.While,
+                                                    ast.Try, ast.With, ast.AsyncWith))
+                walk(n, child_cond)
+        walk(scope_node, False)
         return facts
 
     def _facts_at(self, name, pos):
@@ -2970,14 +3003,9 @@ class _AstAuditor(ast.NodeVisitor):
         if self._capture_masked(name, pos):
             return _VF()
         for binds in reversed(self.fact_scopes):
-            tl = binds.get(name)
-            if tl:
-                vf, bound = None, False
-                for bp, f in tl:
-                    if bp <= pos:
-                        bound, vf = True, f
-                if bound:
-                    return vf
+            r = _resolve_tl(binds.get(name, ()), pos)
+            if r is not None:
+                return r
         return None
 
     def _canon_v(self, name, pos):
@@ -2988,18 +3016,14 @@ class _AstAuditor(ast.NodeVisitor):
         head, dot, rest = name.partition(".")
         if self._capture_masked(head, pos):
             return None
-        i = None
+        i, f = None, None
         for idx in range(len(self.fact_scopes) - 1, -1, -1):
-            tl = self.fact_scopes[idx].get(head)
-            if tl and any(bp <= pos for bp, _f in tl):
-                i = idx
+            r = _resolve_tl(self.fact_scopes[idx].get(head, ()), pos)
+            if r is not None:
+                i, f = idx, r
                 break
         if i is None:
             return self._resolve_import(name)        # not locally bound -> import maps (not global)
-        f = None
-        for bp, ff in self.fact_scopes[i].get(head, ()):
-            if bp <= pos:
-                f = ff
         if f.canon:
             return f.canon + ("." + rest if dot else "")
         if i == len(self.fact_scopes) - 1:
