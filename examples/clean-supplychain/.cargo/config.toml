@@ -1,0 +1,4 @@
+# Pin the OFFICIAL crates.io git index — the canonical, documented way; must stay GREEN
+# (round-4 audit pass 3: the .cargo/config.toml path used to FP as off-registry).
+[source.crates-io]
+registry = "https://github.com/rust-lang/crates.io-index"

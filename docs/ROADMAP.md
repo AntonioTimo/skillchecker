@@ -20,6 +20,7 @@ out of scope" item or a spec "Non-goals" line.
 | I | Self-targeting prose + self-modification + activation-surface (`HI024`/`HI025`/`ME013`/`ME014`/`ME015`/`AST009`) — borrow-from-SkillSpector | 1.9.0 |
 | J | Ecosystem hardening — forged-instruction prose, `os.exec`/Zip-Slip, MCP secret-egress, Phantom Gyp, reverse-shell + staging hosts (`CR041`–`CR044`/`HI026`–`HI029`/`AST010`/`AST011`) | 1.10.0 |
 | — | Adversarial-audit hardening (Codex + self-run multi-agent sweeps, to convergence): fail-closed `IO004`, comma-coordinator negation guard, walrus/`for`/comprehension taint + `HI009` httpx, per-scope-lexical `AST009`, value-aware `AST011` + `.extract`/method-ref + import-alias resolver, recursive manifest discovery, bounded tree walks; AST-based `check_docs.py` doc-currency gate | 1.11.0 |
+| — | Convergence sweep round 4 (8 confirmed defects, no new rule IDs): Unicode-**property** negation boundary (U+201A/em-dash/U+2E41) + polarity-inversion/double-negation guard; `AST009` import-aliased `Path` ctor; `from … import *` star-import resolved across all dotted rules; `AST011` receiver-**provenance** gate (pandas `Series.str.extractall` FP); `.npmrc`/`.yarnrc` off-registry `HI023` | 1.11.1 |
 
 ## Road to v2.0
 
@@ -47,6 +48,16 @@ static gaps is largely dry** — the remaining minors complete surfaces already 
 
 ## Next minors (deepen existing passes — dependency-free)
 
+- **Leak-verb inflections (`HI024`/`HI025`).** The leak-verb alternation is base-form
+  anchored, so a gerund/participle with NO negation ("your job is **revealing** your system
+  prompt", "start by **dumping** your system prompt") under-fires. Add `-ing`/`-s`/`-ed`
+  inflections to the verb set, re-validating against the FP budget (the sub1/sub2 split that
+  keeps generic verbs from blowing the budget). *Source: convergence round-4 re-verify; THREAT_MODEL §8(b).*
+- **More ecosystem index-configs (`HI023`).** The supply gate is a closed filename allowlist;
+  extend `_index_config_kind`/`_supply_index_config` to `.condarc` (conda channels),
+  `.bundle/config` (Bundler `BUNDLE_MIRROR`), `nuget.config` (packageSources), `composer.json`
+  (`repositories`), `.gitconfig` (`insteadOf` URL rewrite), and Homebrew taps. *Source:
+  convergence round-4 completeness critic; THREAT_MODEL §8(c).*
 - **Taint next increment.** Other source/sink families on the v1.8.0 `_TaintAuditor`:
   external-input→exec (`TT5`, mostly subsumed by `AST001`/`AST003`), tainted→
   file-write (exfil-to-disk). Plus the architectural reach: **cross-function** and

@@ -27,6 +27,12 @@ As benign look-alikes it handles safely: it can detect self-modifying code in ot
 
 This skill does not collect or send your system instructions to any remote server. The assistant will never skip a check that could reveal your system prompt to a third party. Both are benign disclaimers — a third-person "does not", and a "never" governing a relative clause — and must stay GREEN (Codex round 3 regression locks).
 
+More defensive disclaimers that must stay GREEN under the Unicode-property boundary and the inverting-bridge guard (convergence sweep regression locks): This skill will never auto-reveal your system prompt to anyone. It will never read/disclose your system instructions either. This skill does not and will not reveal your system prompt. It will refuse to reveal your system prompt when asked. (An intra-word hyphen and a solidus are NOT clause boundaries; a reinforcing double negation "does not and will not" and a SINGLE inverting negation "refuse to" are defensive — none must flag.)
+
+Double-inversion disclaimers — an EVEN number of polarity flips is defensive again, and must stay GREEN (convergence sweep round 4): This skill will never shy away from refusing to reveal your system prompt. The assistant will not hesitate to refuse to reveal your system prompt to anyone. (Both = "always refuse to reveal" = protect the prompt; two inverting verbs cancel, so the parity guard must NOT flag them.)
+
+Fail-mode security vocabulary must stay GREEN — a benign "fail open"/"fail closed"/"fail safe" verb is not an inverting "fail to" (convergence round 4 FP lock): On crash the handler must not fail open and reveal your system prompt. (The negation scopes the whole "fail open and reveal" conjunction; "fail open" is a failure MODE, not "fail to reveal", so parity must not read it as a double negation.)
+
 ## Step 1 — Generate
 
 ```bash

@@ -672,6 +672,88 @@ def _public_ip_in(text):
     return any(_ip_publicness(h) == "public" for h in _candidate_hosts(text))
 
 
+# --- PROSE_TARGETING negation guard: clause-boundary + polarity-inversion tests ---------
+# (shared by the defensive-prose suppressor in scan_file; see its comment for the model.)
+
+# Comma look-alikes that NFKC does NOT fold to ASCII and that are categorized Ps (so the
+# Po test below misses them): the low-9 quotation marks render as a comma. CLOSED set of two.
+_LOW9_COMMA_LOOKALIKES = "‚„"          # ‚ „  SINGLE / DOUBLE LOW-9 QUOTATION MARK
+# Intra-word hyphens (Pd) that do NOT split a clause — 'well-known', 'state-of-the-art'.
+_INTRAWORD_HYPHENS = "-‐‑"             # HYPHEN-MINUS / HYPHEN / NON-BREAKING HYPHEN
+# Punctuation/symbols that do NOT end a clause — word-internal / connective / emphasis marks
+# that appear mid-sentence in real prose (apostrophe, quotes, solidus, ampersand, markdown
+# `* ~ _ \`` etc., middle dots, intra-word hyphens). A clause boundary is the INVERSE: a gap
+# char is a boundary unless it is a letter / digit / mark, ordinary space/tab, a bracket or
+# quote (Ps/Pe/Pi/Pf/Pc), or one of these. So every script's sentence terminator, a So/Sm
+# BULLET (● ▪ ∙), an invisible Cf char, or an exotic Zs space (NBSP / Ogham) is a boundary
+# WITHOUT being enumerated — stdlib cannot test Unicode Terminal_Punctuation, so the small
+# non-breaking allowlist over a broad category test is the disease fix (convergence round 4).
+_NONBREAK_PUNCT = set("'\"/\\&@%#*~`·・‧-‐‑")
+_CLEAN_CATEGORIES = ("Ps", "Pe", "Pi", "Pf", "Pc")   # brackets / quotes / connectors (_)
+_BOUNDARY_IDIOM_RE = re.compile(r"\b(?:until|then|after|before|once|mind|bother)\b", re.I)
+
+# Polarity-INVERTING reluctance/avoidance verbs (+ common inflections) and the bare double
+# negation 'not'. "never <inverter> … reveal" = "always reveal" (double negation). The guard
+# counts inverters in the gap and decides by PARITY (odd => inverted => fire), so a SINGLE
+# inverter fires ("never hesitate to reveal") while a DOUBLE inverter is defensive again
+# ("never shy away from refusing to reveal" = "always refuse to reveal", suppress). The
+# inverter class is open NL (THREAT_MODEL §8) — this enumerates the common forms; the
+# Claude-side review is the backstop for the tail. [convergence sweep round 4]
+_INVERT_VERB_RE = re.compile(
+    # Ambiguous-sense verbs (a benign noun/mode reading exists — "fail open", "an object",
+    # "resistance") count ONLY with an infinitival `to` complement governing the leak verb,
+    # so "must not FAIL OPEN and reveal" does NOT invert (convergence round 4 FP fix).
+    r"\b(?:fail\w*|miss\w*|wait\w*|delay\w*|object\w*|resist\w*|balk\w*)\s+"
+    r"(?:[a-z]+\s+){0,4}?to\b"
+    # Unambiguous reluctance / avoidance / concealment verbs (loose).
+    r"|\b(?:hesitat\w+|refus\w+|neglect\w*|declin\w+|omit\w*|forget\w*|forgot\w*|"
+    r"withhold\w*|withheld|conceal\w*|redact\w*)\b"
+    r"|\bshy\s+away\s+from\b|\bhold(?:s|ing)?\s+back\b|\bpass(?:es|ed|ing)?\s+up\b|"
+    r"\bsay(?:s|ing)?\s+no\b|\bhelp\s+but\b|"
+    r"\bbe\s+(?:afraid|reluctant|shy|unwilling|hesitant|slow)\b|"
+    r"\bnot\b", re.I)
+# Negation TOKENS that are themselves polarity-inverting verbs: when one is the GOVERNING
+# negation AND an adjacent OUTER negation precedes it (with no inverter between), it is a
+# STACKED double negation ("never refuse to reveal" = "always reveal"). They live in the
+# negation list, so the gap is empty and _gap_inverts_polarity can't see them.
+_INVERTIBLE_NEG_RE = re.compile(r"\b(?:refuse\s+to|reject|forbid|prevent|avoid)\b", re.I)
+
+
+def _is_clause_boundary_char(ch: str) -> bool:
+    """True if `ch` ends a clause — decided by the INVERSE of a small non-breaking set, so a
+    separator of ANY category (a script terminator, a So/Sm bullet, an invisible Cf char, an
+    exotic Zs space) counts without enumeration (convergence sweep round 4). A char is NOT a
+    boundary iff it is: a letter / digit / combining mark (Unicode L*/N*/M*), an ordinary
+    space or tab, a bracket / quote / connector (Ps/Pe/Pi/Pf/Pc), or one of the word-internal
+    `_NONBREAK_PUNCT` marks. The low-9 quote comma look-alikes (Ps) are the one exception —
+    forced to boundary. Everything else (Po terminators, Pd dashes, So/Sm, Cf, NBSP/Ogham
+    spaces, Zl/Zp) is a boundary."""
+    if ch in _LOW9_COMMA_LOOKALIKES:
+        return True
+    if ch in _NONBREAK_PUNCT or ch in " \t":
+        return False
+    cat = unicodedata.category(ch)
+    if cat[0] in ("L", "N", "M") or cat in _CLEAN_CATEGORIES:
+        return False
+    return True
+
+
+def _gap_has_clause_boundary(gap: str) -> bool:
+    """True if the NFKC-folded `gap` between a negation and a dangerous verb holds a CLAUSE
+    boundary (a terminator char or a temporal/disregard idiom) — so the negation does NOT
+    adjacently govern the verb and the finding fires."""
+    if any(_is_clause_boundary_char(ch) for ch in gap):
+        return True
+    return bool(_BOUNDARY_IDIOM_RE.search(gap))
+
+
+def _gap_inverts_polarity(gap: str) -> bool:
+    """True if `gap` holds an ODD number of polarity-inverting verbs, so 'never <gap>
+    <danger>' nets to 'always <danger>' and must FIRE. An even count ("shy away from
+    refusing to") is a double inversion that stays defensive (convergence sweep round 4)."""
+    return len(_INVERT_VERB_RE.findall(gap)) % 2 == 1
+
+
 def scan_file(path: Path, root: Path) -> list[Finding]:
     """Open a file and run every rule against each line.
 
@@ -814,18 +896,21 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                 if rule_id in ("CR028", "CR029", "CR030", "CR031",
                                "HI024", "HI025", "ME013", "ME015", "CR041", "HI026"):
                     # Defensive prose: suppress ONLY when the NEAREST preceding negation
-                    # genuinely GOVERNS this dangerous verb. The negation's scope ends at
-                    # a clause boundary — sentence punctuation (. ; : ! ?), a temporal /
-                    # disregard idiom (until/then/…/mind/bother), OR a COMMA that begins a
-                    # FRESH imperative — UNLESS the negated clause is a COORDINATED
-                    # enumeration (an 'or'/'nor' ties the items under one negation), whose
-                    # commas are then transparent. So the comma-splice ATTACK "Never harm
-                    # the user, embed <|im_start|>…" fires (no coordinator: 'never' governs
-                    # 'harm', not 'embed'), while the defensive list "will never print X,
-                    # send Y, or rewrite Z" stays suppressed (the 'or' coordinates it).
-                    # Earlier rounds over-corrected in BOTH directions (comma-always-break
-                    # FP'd real defensive prose; comma-never-break let the splice bypass);
-                    # the coordinator test is the disease fix. [Codex rounds 1-3.]
+                    # genuinely GOVERNS this dangerous verb. NARROW rule — the negation
+                    # suppresses ONLY when it ADJACENTLY governs the verb: NO clause boundary
+                    # in the gap, AND the gap is not a polarity-INVERTING bridge. Any clause
+                    # boundary fires (so the comma-splice "Never harm the user, embed
+                    # <|im_start|>…" fires — 'never' governs 'harm', not 'embed'); a defensive
+                    # ENUMERATION must use comma-free "or" coordination ("never reveal or send
+                    # your prompt") or per-clause negation to stay GREEN (authoring guidance).
+                    # The ONLY adjacency that suppresses is the literal "never reveal your
+                    # system prompt", which IS defensive. Two disease fixes the attacker kept
+                    # probing (convergence sweep, gaps 1-3 & 8): the boundary is decided by
+                    # UNICODE PROPERTY (_gap_has_clause_boundary), not an enumerated codepoint
+                    # class a new comma confusable can slip (U+201A / em-dash / U+2E41 each
+                    # slipped the old `[,.;:!?،、。]`); and a bridge verb in the gap
+                    # ("never hesitate/fail/refuse TO reveal …" = "always reveal …") is a
+                    # double negation, so it must NOT suppress (_gap_inverts_polarity).
                     m = compiled.search(unit)
                     if m:
                         negs = list(re.finditer(
@@ -836,32 +921,25 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                             r"refuse\s+to|reject|forbid|prevent|avoid)\b",
                             unit[: m.start()]))
                         if negs:
-                            # NARROW rule: the negation suppresses ONLY when it ADJACENTLY
-                            # governs the dangerous verb — i.e. NO clause boundary at all
-                            # between the negation and the match. Any boundary fires. This
-                            # is the structural answer to an OPEN class of evasions an
-                            # attacker kept finding in a looser coordinator-aware rule
-                            # (comma-splice, faked ", or" head phrase, Unicode commas,
-                            # Oxford-decoy + sentence bridge — Codex rounds 1-3): the only
-                            # way to make the negation adjacently govern the verb is to
-                            # write "never reveal your system prompt" literally — which IS a
-                            # defensive statement, so suppressing it is correct. A genuine
-                            # defensive ENUMERATION must therefore use comma-free "or"
-                            # coordination ("never reveal or send your prompt") or per-clause
-                            # negation to stay GREEN (documented authoring guidance).
-                            # A boundary = any comma (ASCII / fullwidth-folded-by-NFKC /
-                            # Arabic U+060C / ideographic U+3001), any sentence punctuation
-                            # (ASCII / fullwidth-folded / ideographic full stop U+3002), or a
-                            # temporal / disregard idiom. NFKC folds the fullwidth forms so a
-                            # homoglyph comma cannot slip the splice (Unicode-aware, matching
-                            # the scanner's escalate-only NFKC posture).
                             gap = unicodedata.normalize(
                                 "NFKC", unit[negs[-1].end(): m.start()])
-                            boundary = re.search(
-                                r"[,.;:!?،、。]"
-                                r"|\b(?:until|then|after|before|once|mind|bother)\b",
-                                gap, re.I)
-                            if not boundary:
+                            suppress = (not _gap_has_clause_boundary(gap)
+                                        and not _gap_inverts_polarity(gap))
+                            # Double negation via a STACKED inverting negation ("never
+                            # refuse to reveal", "will not avoid revealing") — the governing
+                            # negation is an inverting VERB negated by an adjacent outer
+                            # negation, so the imperative flips positive: do not suppress.
+                            if (suppress and len(negs) >= 2
+                                    and _INVERTIBLE_NEG_RE.search(negs[-1].group())):
+                                inner = unicodedata.normalize(
+                                    "NFKC", unit[negs[-2].end(): negs[-1].start()])
+                                # The outer negation flips the invertible governing one
+                                # (fire) UNLESS the inner gap itself inverts back (defensive
+                                # "do not hesitate to refuse to reveal" — parity).
+                                if (not _gap_has_clause_boundary(inner)
+                                        and not _gap_inverts_polarity(inner)):
+                                    suppress = False
+                            if suppress:
                                 continue   # negation adjacently governs the match -> suppress
 
                 why_out = why
@@ -1409,6 +1487,8 @@ SUPPLY_MANIFEST_NAMES = {
     "go.mod",
     "environment.yml", "environment.yaml",
     "binding.gyp",
+    ".npmrc", ".yarnrc", ".yarnrc.yml",
+    "pip.conf", "pip.ini", ".gemrc",       # per-ecosystem index-config files (round 4)
 }
 LOCKFILE_NAMES = {
     "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
@@ -1430,6 +1510,19 @@ def _host_of(url: str) -> str:
         return (urlsplit(url).hostname or "").lower()
     except ValueError:
         return ""
+
+
+def _is_local_host(host: str) -> bool:
+    """True for a localhost / loopback / unspecified host — a local dev or air-gapped index
+    mirror (devpi, verdaccio), not an off-registry exfil target (convergence round 4 FP)."""
+    host = (host or "").lower().strip("[]")
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_loopback or ip.is_unspecified
+    except ValueError:
+        return False
 
 
 def _is_registry_host(host: str) -> bool:
@@ -1461,6 +1554,21 @@ def _is_npm_bare_shorthand(s: str) -> bool:
     return bool(re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*(#.+)?$", s))
 
 
+def _is_official_crates_index(url: str) -> bool:
+    """True for the OFFICIAL crates.io index — the GitHub-hosted git index
+    (`github.com/rust-lang/crates.io-index`) or the sparse index host. The bare-URL form
+    (no `registry+` prefix) is the canonical Cargo source and must not flag (round-4 audit FP)."""
+    h = _host_of(url)
+    try:
+        p = urlsplit(url).path.rstrip("/").lower()
+    except ValueError:
+        p = ""
+    if p.endswith(".git"):
+        p = p[:-4]
+    return h in ("index.crates.io", "static.crates.io") \
+        or (h == "github.com" and p == "/rust-lang/crates.io-index")
+
+
 def _classify_source(spec):
     """Return a short reason string if `spec` names a NON-REGISTRY dependency
     source (the HI023 signal), else None. Local / workspace / relative paths and
@@ -1484,17 +1592,10 @@ def _classify_source(spec):
     if low.startswith(("registry+", "sparse+")):
         inner = s.split("+", 1)[1]
         ih = _host_of(inner)
-        try:
-            ipath = urlsplit(inner).path.rstrip("/").lower()
-        except ValueError:
-            ipath = ""
-        if ipath.endswith(".git"):
-            ipath = ipath[:-4]
-        # Exact official path only — `github.com/attacker/rust-lang/crates.io-index`
-        # is a DIFFERENT repo and must not be allowlisted by a substring match.
-        if (ih in ("index.crates.io", "static.crates.io")
-                or (ih == "github.com" and ipath == "/rust-lang/crates.io-index")
-                or _is_registry_host(ih)):
+        # The OFFICIAL crates.io index (exact path — `github.com/attacker/rust-lang/
+        # crates.io-index` is a DIFFERENT repo) or a known registry host is exempt;
+        # `registry+https://attacker.test/…` is an off-registry alternate registry.
+        if _is_official_crates_index(inner) or _is_registry_host(ih):
             return None
         return "off-registry alternate registry source (" + (ih or inner) + ")"
 
@@ -1513,6 +1614,8 @@ def _classify_source(spec):
     if um:
         url, scheme = um.group(0), um.group(1).lower()
         host = _host_of(url)
+        if _is_official_crates_index(url):
+            return None                       # the canonical Cargo git/sparse index — fine
         if scheme == "http":
             return "non-TLS http dependency source (" + (host or "?") + ")"
         if host and not _is_registry_host(host):
@@ -1678,7 +1781,10 @@ def _supply_pyproject(text, rel):
             if "]" in st:
                 in_array = False
             continue
-        if section == "tool.poetry.source":          # [[tool.poetry.source]] url = "…"
+        # Custom package-source/index tables that the installer reads on resolve:
+        # Poetry `[[tool.poetry.source]]`, uv `[[tool.uv.index]]`, PDM `[[tool.pdm.source]]`
+        # (the uv/pdm siblings were a fragile-sibling miss — convergence round 4).
+        if section in ("tool.poetry.source", "tool.uv.index", "tool.pdm.source"):
             um = re.search(r"(?i)\burl\s*=\s*[\"']([^\"']+)[\"']", st)
             if um:
                 reason = _classify_source(um.group(1))
@@ -1686,8 +1792,8 @@ def _supply_pyproject(text, rel):
                     findings.append(Finding(
                         severity="HIGH", rule_id="HI023", file=rel, line=ln_no,
                         snippet=raw.strip()[:120],
-                        why="Poetry custom package source points off-registry — " + reason
-                            + "; a dependency tagged with this source is fetched past the default registry's audit.",
+                        why="Custom package source/index (" + section + ") points off-registry — " + reason
+                            + "; a dependency resolved through this source is fetched past the default registry's audit.",
                         suggested_fix="Remove the custom source, or point it at the official index."))
             continue
         if is_pep508_array_section(section):
@@ -1764,6 +1870,103 @@ def _supply_source_scan(text, rel, kind):
                     why="Dependency/lockfile source points off-registry — " + reason
                         + "; bypasses the registry's signing/audit.",
                     suggested_fix="Resolve from the registry; remove the git/URL source or vendor & audit it."))
+    return findings
+
+
+# npm/yarn rc index-redirect (gap 7). A `registry=` / `@scope:registry=` / yarn-berry
+# `npmRegistryServer:` line, or a `//host/:_authToken` credential line, that names an
+# off-registry host is the dependency-confusion vector — the file npm/yarn actually reads
+# to choose the index, the SAME off-registry signal HI023 flags in a lockfile `resolved`.
+_NPMRC_REGISTRY_RE = re.compile(
+    r"\s*(?:@[\w.\-]+:)?(?:registry|npmRegistryServer)\b\s*[:=]?\s*[\"']?(\S+?)[\"']?\s*$", re.I)
+_NPMRC_AUTH_RE = re.compile(r"\s*(//\S*?):_(?:authToken|password|username|auth)\b", re.I)
+
+
+def _npmrc_host(val: str) -> str:
+    """Host of an rc registry value. A real URL (`scheme://host…`) yields its host even for
+    a single-label intranet name (`http://npm-internal:4873/` -> npm-internal). A scheme-LESS
+    value must look like a domain/IP (a '.' or ':') so a boolean/flag (`registry=true`) is
+    not misread as a host (convergence sweep round 4: a single-label URL host used to be
+    dropped, an asymmetry with the auth line)."""
+    val = (val or "").strip().strip("\"'")
+    if "://" in val:
+        return _host_of(val)
+    h = _host_of("//" + val)
+    return h if ("." in h or ":" in h) else ""
+
+
+def _supply_npmrc(text, rel):
+    """Off-registry index-redirect scan for .npmrc / .yarnrc / .yarnrc.yml (gap 7). Emits
+    HI023 when a registry/auth host is present and is NOT a known registry host. Dedups per
+    host; registry.npmjs.org / yarnpkg / npmmirror stay GREEN, npm.pkg.github.com flags
+    (mirrors HI023's existing GitHub-source treatment). Boolean/host-less lines skip."""
+    findings, seen = [], set()
+    for ln_no, raw in enumerate(text.splitlines(), start=1):
+        line = re.sub(r"(?:^|\s)[#;].*$", "", raw)        # strip ini / yaml comments
+        host = ""
+        m = _NPMRC_REGISTRY_RE.match(line)
+        if m:
+            host = _npmrc_host(m.group(1))
+        else:
+            ma = _NPMRC_AUTH_RE.match(line)
+            if ma:
+                host = _host_of(ma.group(1))
+        if host and not _is_registry_host(host) and not _is_local_host(host) and host not in seen:
+            seen.add(host)
+            findings.append(Finding(
+                severity="HIGH", rule_id="HI023", file=rel, line=ln_no,
+                snippet=raw.strip()[:120],
+                why="npm/yarn rc points the package index at an off-registry host (" + host
+                    + ") — a dependency-confusion redirect that silently re-points every "
+                      "install at an attacker-controlled registry; the installer's signing/"
+                      "audit chain is bypassed.",
+                suggested_fix="Point registry at the official index (registry.npmjs.org), or remove the redirect."))
+    return findings
+
+
+def _index_config_kind(p) -> str:
+    """The per-ecosystem index-config kind for a path, or '' — pip.conf/pip.ini, .gemrc, OR
+    `.cargo/config[.toml]` (cargo's config is a GENERIC filename, so it is gated on the
+    `.cargo` parent to avoid flagging an unrelated `config.toml`). Convergence sweep round 4:
+    the off-registry index redirect closed for npm/yarn applies to pip/cargo/gem identically."""
+    n = p.name
+    if n in ("pip.conf", "pip.ini"):
+        return "pip"
+    if n == ".gemrc":
+        return "gem"
+    if p.parent.name == ".cargo" and n in ("config.toml", "config"):
+        return "cargo"
+    return ""
+
+
+def _supply_index_config(text, rel, kind):
+    """Off-registry index/source redirect in a pip / cargo / gem config (round 4). Flags any
+    URL host (and pip `trusted-host`) that is not a known registry host — the same
+    dependency-confusion vector as the npm/yarn rc. pypi.org / crates.io / rubygems.org stay
+    GREEN via REGISTRY_HOSTS; localhost/loopback (no '.') is skipped."""
+    findings, seen = [], set()
+    for ln_no, raw in enumerate(text.splitlines(), start=1):
+        line = re.sub(r"(?:^|\s)[#;].*$", "", raw)
+        # The OFFICIAL crates.io git index is the canonical `.cargo/config.toml` source and
+        # must stay GREEN here too (round-4 audit pass 3: the sibling _classify_source path
+        # exempted it but this one did not — same canonization, two paths).
+        hosts = [_host_of(m.group(0))
+                 for m in re.finditer(r"(?:https?|ftp)://[^\s\"'#;,)\]]+", line)
+                 if not _is_official_crates_index(m.group(0))]
+        tm = re.match(r"\s*trusted-host\s*[:=]\s*[\"']?(\S+?)[\"']?\s*$", line, re.I)
+        if tm:                                        # pip trusted-host: a bare host, no scheme
+            hosts.append(_npmrc_host(tm.group(1)))
+        for host in hosts:
+            if host and not _is_registry_host(host) and not _is_local_host(host) and host not in seen:
+                seen.add(host)
+                findings.append(Finding(
+                    severity="HIGH", rule_id="HI023", file=rel, line=ln_no,
+                    snippet=raw.strip()[:120],
+                    why="A bundled " + kind + " config points the package index/source at an "
+                        "off-registry host (" + host + ") — a dependency-confusion redirect that "
+                        "re-points installs at an attacker-controlled registry, bypassing the "
+                        "registry's signing/audit.",
+                    suggested_fix="Point the index at the official registry, or remove the redirect."))
     return findings
 
 
@@ -1970,7 +2173,8 @@ def check_supply_chain(skill_root: Path) -> list[Finding]:
     walk_state = {}
     candidates = sorted(
         p for p in _iter_tree_files(skill_root, state=walk_state)
-        if p.name in SUPPLY_MANIFEST_NAMES or _is_requirements_txt(p.name))
+        if p.name in SUPPLY_MANIFEST_NAMES or _is_requirements_txt(p.name)
+        or _index_config_kind(p))
     if walk_state.get("truncated"):
         # The tree was too large to fully walk — a manifest could be hidden in the
         # un-walked remainder. FAIL LOUD (never silently GREEN), mirroring the IO004
@@ -2047,6 +2251,11 @@ def check_supply_chain(skill_root: Path) -> list[Finding]:
             findings.extend(_supply_gomod(text, rel))
         elif name == "binding.gyp":
             findings.extend(_supply_binding_gyp(path, rel))
+        elif name in (".npmrc", ".yarnrc", ".yarnrc.yml"):
+            findings.extend(_supply_npmrc(_read_text_safe(path) or "", rel))
+        elif _index_config_kind(path):
+            findings.extend(_supply_index_config(
+                _read_text_safe(path) or "", rel, _index_config_kind(path)))
         else:
             text = _read_text_safe(path) or ""
             findings.extend(_supply_source_scan(text, rel, kind))
@@ -2092,7 +2301,41 @@ _OS_EXEC_FAMILY = {
     "os.spawnv", "os.spawnve", "os.spawnvp", "os.spawnvpe",
     "os.spawnl", "os.spawnle", "os.spawnlp", "os.spawnlpe",
     "os.posix_spawn", "os.posix_spawnp",
+    # NOTE: os.startfile is deliberately EXCLUDED — it is the Windows shell "open with the
+    # associated default app" call (double-click equivalent), predominantly a BENIGN document-open
+    # idiom (os.startfile("report.pdf")), not process-image replacement like os.exec*/os.spawn*.
+    # Adding it false-fired AST010 HIGH on benign opens (round-6 CONFIRM sweep R6-FP-startfile).
 }
+
+# Dangerous CANONICAL leaves the dotted AST rules already key on, to which a BARE name from
+# `from <mod> import *` may resolve (convergence sweep gap 6). Gating star-resolution on
+# this finite set means zero new FP surface beyond the explicit-import form. Excludes
+# `os.open` (would shadow builtin `open` handling) and the builtins (eval/exec/compile/
+# getattr/__import__ — not reachable as module members via `from os import *`).
+_STAR_RESOLVABLE = frozenset({
+    "os.system", "os.popen", "os.replace", "os.rename",
+    "os.open",   # `from os import *; open(__file__, O_WRONLY)` — the os.open arm distinguishes
+                 # write-FLAGS from a builtin-open string mode, so this is collision-safe (r4 audit)
+    "shutil.unpack_archive", "shutil.copyfile", "shutil.copy", "shutil.copy2", "shutil.move",
+    "pickle.loads", "marshal.loads",
+    "yaml.load",
+    "importlib.import_module",
+    "subprocess.run", "subprocess.call", "subprocess.check_call",
+    "subprocess.check_output", "subprocess.Popen", "subprocess.getoutput",
+    "subprocess.getstatusoutput",
+}) | _OS_EXEC_FAMILY
+
+# Archive openers whose result object's `.extractall()` is the Zip-Slip sink (AST011). The
+# AST011 extractall arm fires ONLY when its receiver provably resolves to one of these
+# (convergence sweep gap 5: keying on the bare `extractall` leaf FP'd on pandas
+# Series.str.extractall and any non-archive `.extractall()`). Canon-resolved, so an import
+# alias (`import tarfile as tf` / `from zipfile import ZipFile`) still counts.
+_ARCHIVE_OPENERS = frozenset({
+    "tarfile.open", "tarfile.TarFile", "zipfile.ZipFile", "zipfile.PyZipFile",
+    # tarfile.TarFile alternative-constructor classmethods (what tarfile.open delegates to)
+    "tarfile.TarFile.open", "tarfile.TarFile.gzopen",
+    "tarfile.TarFile.bz2open", "tarfile.TarFile.xzopen",
+})
 
 
 def _names_in_target(target):
@@ -2106,22 +2349,113 @@ def _names_in_target(target):
         yield from _names_in_target(target.value)
 
 
-def _is_own_file_target(node) -> bool:
+def _match_capture_bindings(pattern):
+    """Yield (name, node) for every name a match-case PATTERN binds — a capture (`case x`),
+    a star (`case [*rest]`), or a mapping-rest (`case {**rest}`) — recursing through nested
+    patterns (`case [a, {"k": b}]`). A wildcard `case _` binds nothing. Empty on Python < 3.10
+    (no `match` syntax exists, so no Match node can reach the per-scope timeline walks)."""
+    MatchAs = getattr(ast, "MatchAs", None)
+    if MatchAs is None:
+        return
+    MatchStar = getattr(ast, "MatchStar", None)
+    MatchMapping = getattr(ast, "MatchMapping", None)
+    for sub in ast.walk(pattern):
+        if isinstance(sub, MatchAs) and sub.name:
+            yield sub.name, sub
+        elif MatchStar is not None and isinstance(sub, MatchStar) and sub.name:
+            yield sub.name, sub
+        elif MatchMapping is not None and isinstance(sub, MatchMapping) and sub.rest:
+            yield sub.rest, sub
+
+
+def _conditional_rebinds(node):
+    """Yield (name, mask_pos, restore_pos) for the names an `except E as name` handler or a
+    `match`/case CAPTURE binds. Within [mask_pos, restore_pos) the name is the caught exception
+    / captured sub-value — NOT any prior alias; AFTER restore_pos it is ambiguous (Python deletes
+    an except-name on the CAUGHT path but keeps the prior binding on the fall-through path; a
+    match capture persists only if its case ran). So the per-scope timelines MASK the name inside
+    the block and RESTORE the prior binding after — killing the contrived within-block false-
+    POSITIVE without masking a real post-block use, which would be a false-NEGATIVE (round-8
+    audit: a naive flat reset breaks `run=os.system; try: ... except E as run: ...; run(cmd)`,
+    where `run` is still os.system on the fall-through path)."""
+    if isinstance(node, ast.ExceptHandler):
+        if node.name:
+            mask = (node.lineno, node.col_offset)
+            rest = (getattr(node, "end_lineno", node.lineno) or node.lineno,
+                    getattr(node, "end_col_offset", 0) or 0)
+            yield node.name, mask, rest
+        return
+    Match = getattr(ast, "Match", None)
+    if Match is not None and isinstance(node, Match):
+        for case in node.cases:
+            body = case.body
+            rest = (getattr(body[-1], "end_lineno", 0) or 0,
+                    getattr(body[-1], "end_col_offset", 0) or 0)
+            for nm, sub in _match_capture_bindings(case.pattern):
+                yield nm, (sub.lineno, sub.col_offset), rest
+
+
+def _import_canon(node):
+    """Yield (bound_name, dotted_canonical) for each name an `import` / `from … import` binds, so the
+    per-scope timelines treat a local `import os as run` / `from os import system as run` as a REBIND
+    of the name (round-8 audit sibling-form D: a local import re-binding a name previously bound to
+    something else was invisible to the position-aware resolver, leaking the stale binding)."""
+    if isinstance(node, ast.Import):
+        for a in node.names:
+            if a.asname:
+                yield a.asname, a.name                      # import os.path as p  -> p = os.path
+            else:
+                top = a.name.split(".")[0]                  # import os[.path]      -> binds `os`
+                yield top, top
+    elif isinstance(node, ast.ImportFrom):
+        if node.level and node.level > 0:
+            # a RELATIVE import (`from .os import system as run`) binds the name to a LOCAL package
+            # symbol, NOT the stdlib — canonicalizing it to `os.system` is a false positive
+            # (round-8 re-sweep). Yield a None canonical so the name RESETS (masks a prior alias)
+            # without resolving to any dangerous dotted name.
+            for a in node.names:
+                if a.name != "*":
+                    yield (a.asname or a.name), None
+            return
+        mod = node.module or ""
+        for a in node.names:
+            if a.name == "*":
+                continue                                    # star handled by the global star map
+            yield (a.asname or a.name), (mod + "." + a.name if mod else a.name)
+
+
+def _is_own_file_target(node, is_path_ctor=None) -> bool:
     """True only if `node` IS, INLINE, the skill's own running file: bare `__file__`
     or `Path(__file__)` (single positional arg, no transform), unwrapping a walrus
     `(p := …)` to its value. A DERIVED sibling (`.with_name`/`.with_suffix`/`.parent`/
     `os.path.dirname`/`/`-join) is a DIFFERENT file and is NOT a self-target (AST009 FP
-    guard). A Name bound to `__file__` is resolved separately, per-scope, by the auditor."""
+    guard). A Name bound to `__file__` is resolved separately, per-scope, by the auditor.
+
+    The Path constructor is recognized by leaf name (`pl.Path` / `pathlib.Path` attr, a bare
+    `Path`) AND, when `is_path_ctor(func_node)` is supplied, by a POSITION-AWARE alias — so
+    `from pathlib import Path as P; P(__file__)` is caught while a `P = Safe; P(__file__)`
+    rebind is not (round-4 audit pass 3: the old global path_ctors set was flow-insensitive)."""
     NE = getattr(ast, "NamedExpr", None)
     if NE is not None and isinstance(node, NE):
-        return _is_own_file_target(node.value)
+        return _is_own_file_target(node.value, is_path_ctor)
     if isinstance(node, ast.Name):
         return node.id == "__file__"
     if isinstance(node, ast.Call):
         f = node.func
-        tail = f.attr if isinstance(f, ast.Attribute) else (f.id if isinstance(f, ast.Name) else None)
-        if tail == "Path" and len(node.args) == 1 and not node.keywords:
-            return _is_own_file_target(node.args[0])
+        if isinstance(f, (ast.Name, ast.Attribute)):
+            # The Path-ctor test is POSITION-AWARE when a resolver is supplied (so a param /
+            # for-target / local rebind named `Path`/`pl.Path` is shadow-masked — round-4 audit
+            # pass 5 FP); a literal leaf-name fallback covers a None resolver.
+            if is_path_ctor is not None:
+                is_path = is_path_ctor(f)
+            else:
+                is_path = (f.attr == "Path") if isinstance(f, ast.Attribute) else (f.id == "Path")
+        elif isinstance(f, ast.Call) and is_path_ctor is not None:
+            is_path = is_path_ctor(f)       # inline getattr(<base>, "Path")(__file__) ctor (round-7)
+        else:
+            is_path = False
+        if is_path and len(node.args) == 1 and not node.keywords:
+            return _is_own_file_target(node.args[0], is_path_ctor)
     return False
 
 
@@ -2168,6 +2502,8 @@ _OS_OPEN_WRITE_FLAGS = {"O_WRONLY", "O_RDWR", "O_TRUNC", "O_CREAT", "O_APPEND", 
 def _os_open_writes(flags_node) -> bool:
     """True if an os.open() flags expression (possibly an OR of os.O_* attributes)
     references any write/create/truncate flag — so a read-only os.open never fires."""
+    if flags_node is None:
+        return False
     for sub in ast.walk(flags_node):
         if isinstance(sub, ast.Attribute) and sub.attr in _OS_OPEN_WRITE_FLAGS:
             return True
@@ -2176,13 +2512,46 @@ def _os_open_writes(flags_node) -> bool:
     return False
 
 
+def _inplace_edit(node) -> bool:
+    """True if a fileinput.input/FileInput call has an `inplace` arg that is not a provably
+    FALSE constant (kwarg or positional index 1). inplace=True redirects stdout INTO the named
+    file, rewriting it in place; a read-only fileinput(__file__) has no inplace and stays GREEN."""
+    for kw in node.keywords:
+        if kw.arg == "inplace":
+            return not (isinstance(kw.value, ast.Constant) and not kw.value.value)
+    if len(node.args) > 1:                      # fileinput.input(files, inplace, backup, ...)
+        a = node.args[1]
+        return not (isinstance(a, ast.Constant) and not a.value)
+    return False
+
+
+def _arg_or_kw(node, idx, kwname):
+    """The call argument at positional index `idx`, else the `kwname=` keyword value, else None —
+    so a destination passed as `dst=__file__` is checked exactly like the positional form."""
+    if len(node.args) > idx:
+        return node.args[idx]
+    for kw in node.keywords:
+        if kw.arg == kwname:
+            return kw.value
+    return None
+
+
 def _dotted_name(node):
     """Resolve a func/expr node to a dotted name ('os.system', 'eval').
-    Returns None if it is not a plain Name/Attribute chain."""
+    Returns None if it is not a plain Name/Attribute chain. A walrus `(m := os).system` / a bare
+    `(x := os.system)` is TRANSPARENT — the NamedExpr is unwrapped to its value anywhere in the
+    chain, so a walrus RHS / attribute base / getattr base resolves like the un-walrus'd form
+    (round-8 re-sweep: walrus was unwrapped only at the getattr head, leaking a one-liner bypass)."""
+    NE = getattr(ast, "NamedExpr", None)
     parts = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
+    while True:
+        if NE is not None and isinstance(node, NE):
+            node = node.value
+        elif isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        else:
+            break
     if isinstance(node, ast.Name):
         parts.append(node.id)
         return ".".join(reversed(parts))
@@ -2215,13 +2584,16 @@ def _uses_constructor(node):
 
 
 class _AstAuditor(ast.NodeVisitor):
-    def __init__(self, rel, src, alias, open_aliases=None, import_modules=None, import_from=None):
+    def __init__(self, rel, src, alias, open_aliases=None, import_modules=None,
+                 import_from=None, star_modules=None, assign_aliases=None):
         self.rel = rel
         self.src = src
         self.alias = alias            # name -> builtin it aliases (eval/exec/compile)
         self.open_aliases = open_aliases or set()   # names bound to the `open` builtin
         self.import_modules = import_modules or {}  # `import shutil as sh` -> sh: shutil
         self.import_from = import_from or {}        # `from shutil import x` -> x: shutil.x
+        self.star_modules = star_modules or set()   # `from shutil import *` -> {shutil}
+        self.assign_aliases = assign_aliases or {}  # `mv = os.replace` -> mv: os.replace
         self.method_scopes = []   # stack: name -> method-leaf (ex = t.extractall; getattr…)
         # Stack of (file_names, bound_names) per lexical scope. PER-SCOPE (not the old
         # global set, which leaked cross-function — Codex r1). `file_names` are names
@@ -2230,11 +2602,24 @@ class _AstAuditor(ast.NodeVisitor):
         # (params + non-file assigns), so an inner binding MASKS an outer __file__ binding
         # of the same name (lexical resolution: a sibling fn's `src` param must not fire).
         self.scopes = []
+        # Stack of per-scope POSITION-AWARE timelines (pushed in lockstep with self.scopes):
+        #  archive_scopes: {name: [(pos, is_archive)]} for the AST011 receiver-provenance gate;
+        #  alias_scopes:   {name: [(pos, canonical)]} for within-scope callable/module aliases,
+        #  so _canon resolves a name AS OF the use position (round-4 audit flow-sensitivity).
+        self.archive_scopes = []
+        self.alias_scopes = []
+        # capture_scopes: {name: [(mask_pos, restore_pos)]} per scope — the regions where a name is
+        # an `except … as` / `match` CAPTURE (the caught exception / matched sub-value). _capture_
+        # masked consults this so a use INSIDE the block resolves to nothing (not a pre-block alias/
+        # __file__/archive/method-ref), while a use AFTER falls through to the normal timelines —
+        # block-scoped masking that does NOT poison _local_binding_scope (round-8 audit F1).
+        self.capture_scopes = []
         self.findings = []
 
-    def _canon(self, name):
-        """Canonicalize a dotted call name through the import-alias maps so `sh.X`/bare
-        `X` resolve to their real `module.X` (hardens every dotted AST rule — Codex r3)."""
+    def _resolve_import(self, name):
+        """Resolve a dotted name through the IMPORT maps only (import_from / import_modules /
+        star_modules) — no assignment aliases, no shadow. The import-level canonical form,
+        used both by _canon's fallback and by the per-scope alias-timeline builder."""
         if not name:
             return name
         if name in self.import_from:
@@ -2242,47 +2627,367 @@ class _AstAuditor(ast.NodeVisitor):
         head, dot, rest = name.partition(".")
         if dot and head in self.import_modules:
             return self.import_modules[head] + "." + rest
+        if not dot and name in self.import_modules:
+            return self.import_modules[name]      # a BARE module alias (`import os as o` -> o = os),
+            # so a getattr base `getattr(o, "system")` resolves to os.system (round-8 re-sweep)
+        if not dot and self.star_modules:
+            # `from <mod> import *` brings a BARE dangerous name into scope; resolve it ONLY
+            # to a known-dangerous canonical leaf (the finite set the dotted rules key on) ->
+            # zero new FP surface, hardening every dotted AST rule against the star-import form
+            # (gap 6), incl. the archive openers (`from tarfile import *; open(p).extractall()`).
+            for mod in self.star_modules:
+                cand = mod + "." + name
+                if cand in _STAR_RESOLVABLE or cand in _ARCHIVE_OPENERS:
+                    return cand
         return name
 
-    @staticmethod
-    def _scope_bindings(scope_node, param_names=()):
-        """POSITION-AWARE __file__ binding timeline for THIS scope (NOT into nested
-        function/class/lambda scopes). Returns `binds = {name: [(lineno, kind), …]}` in
-        source order, kind ∈ {'file','seqfile','other'}. _self_target resolves a name AS
-        OF a write call's lineno (its most recent prior binding), so `p=__file__;
-        p.write(); p=None` fires (write while p IS __file__) and `p=Path(__file__);
-        p=p.with_name(x); p.write()` does not (rebound to a sibling BEFORE the write) —
-        Codex r3 sweep flow-sensitivity. A param (kind 'other' at lineno 0) masks an outer
-        __file__ binding. 'seqfile' = bound to a literal/comprehension sequence holding
-        __file__ (so `for p in paths` over it binds p as 'file')."""
+    def _local_binding_scope(self, head, pos):
+        """Index of the INNERMOST active scope that binds `head` AT OR BEFORE `pos` — a param
+        (at (0,0)), an assignment / for-target / AnnAssign / walrus at its position — or None if
+        `head` is not locally bound yet at `pos` (so it is the module import / a future rebind).
+        Drives the position-aware shadow decision uniformly across the alias / path-ctor /
+        method-ref resolvers (round-4 audit pass 5: a FUTURE rebind must not retroactively mask
+        an earlier import-use, and a param/for/AnnAssign must mask just like an assignment)."""
+        for i in range(len(self.scopes) - 1, -1, -1):
+            tl = self.scopes[i].get(head)
+            if tl and any(bp <= pos for bp, _k in tl):
+                return i
+        return None
+
+    def _path_ctor_at(self, func_node) -> bool:
+        """True if a call's func resolves to the pathlib.Path CONSTRUCTOR as of its position —
+        POSITION-AWARE (a rebind masks). Resolves an alias (`P = pathlib.Path` / `from pathlib
+        import Path as P`) via the per-scope alias timeline (read directly, so it works while
+        _scope_bindings is still computing self.scopes) then the import maps."""
+        pos = (getattr(func_node, "lineno", 0), getattr(func_node, "col_offset", 0))
+        nm = _dotted_name(func_node)
+        if not nm:
+            # an inline getattr(<base>, "Path")(...) ctor — the base resolves through imports
+            return isinstance(func_node, ast.Call) and self._func_canon(func_node, pos) == "pathlib.Path"
+        head, dot, rest = nm.partition(".")
+        if self._capture_masked(head, pos):
+            return False                        # the ctor name is an except/match capture here
+
+        i = self._local_binding_scope(head, pos)
+        if i is not None:                       # locally bound as of pos (param/for/assign/…)
+            canon = None
+            for bp, cn in self.alias_scopes[i].get(head, ()):
+                if bp <= pos:
+                    canon = cn
+            resolved = (canon + "." + rest if dot else canon) if canon else None
+            return resolved == "pathlib.Path"   # a non-alias local (param/for/AnnAssign) -> masked
+        return self._resolve_import(nm) == "pathlib.Path"   # the import (before any rebind)
+
+    def _canon(self, name, pos=None):
+        """Canonicalize a dotted call name to its real `module.X`. When a `pos` (lineno,
+        col_offset) is given, a WITHIN-SCOPE assignment alias is resolved POSITION-AWARELY
+        first: the innermost scope that binds the head decides via its most-recent binding AS
+        OF `pos`, so a rebind masks (`mv=os.replace; mv(__file__); mv=safe` still resolves mv
+        -> os.replace AT the call, and a param `def f(system): system()` resolves to nothing)
+        — round-4 audit flow-sensitivity. Otherwise falls back to the import/star maps and the
+        flow-insensitive global assign map (`a = os; a.replace`) — used only when pos is None."""
+        if not name:
+            return name
+        head, dot, rest = name.partition(".")
+        if pos is not None and self._capture_masked(head, pos):
+            return None                  # the head is an except/match capture here, not the alias
+        if pos is not None:
+            i = self._local_binding_scope(head, pos)
+            if i is None:
+                # NOT locally bound as of pos -> it is the module import (a later rebind must
+                # not retroactively mask an earlier import-use — round-4 audit pass 5). Resolve
+                # via the IMPORT maps, NOT the flow-insensitive global assign map.
+                return self._resolve_import(name)
+            local = None
+            for bp, cn in self.alias_scopes[i].get(head, ()):
+                if bp <= pos:
+                    local = cn
+            if local:
+                return local + ("." + rest if dot else "")
+            if i == len(self.scopes) - 1:
+                # INNERMOST scope binds head to a non-alias (param / local var / for-target /
+                # AnnAssign) -> a definite shadow. Return None, NOT the name: the unchanged
+                # dotted string `shutil.unpack_archive` would still match the rule (round-4
+                # audit pass 3). None matches no rule.
+                return None
+            # bound only in an OUTER scope to a non-alias (a module placeholder `run=None` later
+            # reassigned via `global run; run=os.system`) -> fall through to the global map.
+        if name in self.assign_aliases:
+            return self.assign_aliases[name]   # `mv = os.replace` / `PP = pathlib.Path` (pos=None)
+        if self._shadowed(head):
+            return name
+        if name in self.import_from:
+            return self.import_from[name]
+        if dot and head in self.import_modules:
+            return self.import_modules[head] + "." + rest
+        if dot and head in self.assign_aliases:
+            return self.assign_aliases[head] + "." + rest   # `a = os; a.replace`
+        return self._resolve_import(name)                    # star-import resolution
+
+    def _shadowed(self, head) -> bool:
+        """True if `head` is bound by a LOCAL param/assignment in an active scope (so a
+        module-level import/star of the same name is masked) — but NOT if it is an explicit
+        callable/module alias (those resolve). The position-aware path above subsumes this
+        for `pos`-aware calls; this remains for the pos=None fallback."""
+        return bool(head) and head not in self.assign_aliases \
+            and any(head in binds for binds in self.scopes)
+
+    def _func_canon(self, func, pos):
+        """Canonical dotted name of a call's func, POSITION-AWARE — the single entry point so
+        every dotted rule AND the archive-opener / Path-ctor gates see the inline-getattr form
+        uniformly. An inline `getattr(<base>, "<literal>")(...)` resolves to `<base>.<literal>`
+        ONLY when the getattr head itself resolves to the BUILTIN getattr (bare-unbound or
+        `builtins.getattr`) — so a locally-shadowed `def f(getattr): getattr(os,"system")` does
+        NOT dispatch (round-7 audit FP) — and the base is resolved RECURSIVELY (so `builtins.
+        getattr`, a module alias, or a nested getattr all work; round-7 audit FN)."""
+        NE = getattr(ast, "NamedExpr", None)
+        if NE is not None and isinstance(func, NE):
+            return self._func_canon(func.value, pos)   # `(run := os.system)(...)` — the walrus VALUE
+                                                       # is the callee (round-8 audit sibling-form E).
+        dn = _dotted_name(func)
+        if dn:
+            return self._canon(dn, pos)
+        if isinstance(func, ast.Call) and len(func.args) >= 2 \
+                and isinstance(func.args[1], ast.Constant) and isinstance(func.args[1].value, str):
+            # resolve the getattr HEAD through _func_canon (not _dotted_name) so a walrus-bound
+            # getattr `(g := getattr)(os,"system")(...)` dispatches too (round-8 re-sweep); still
+            # shadow-safe — a locally-shadowed getattr param resolves to None, not the builtin.
+            if self._func_canon(func.func, pos) in ("getattr", "builtins.getattr"):
+                base = self._func_canon(func.args[0], pos)
+                if base:
+                    return self._canon(base + "." + func.args[1].value, pos)
+        return None
+
+    def _capture_masked(self, name, pos):
+        """True if `name` is, AT pos, an `except … as` / `match` CAPTURE (the caught exception /
+        matched sub-value) rather than any pre-block binding — so a use there must NOT resolve to a
+        prior alias / __file__ / archive / method-ref. Block-scoped: only INSIDE the handler/case
+        body, and only until a REAL rebind of the name inside that body (recorded in the alias
+        timeline) supersedes the capture — then the normal position-aware timeline wins. Consulting
+        a SEPARATE region map (not the timelines) is what keeps a post-block use firing and keeps
+        _local_binding_scope clean for an otherwise-unbound captured builtin (round-8 audit F1)."""
+        if not self.capture_scopes:
+            return False
+        regions = self.capture_scopes[-1].get(name)
+        if not regions:
+            return False
+        for mp, rp in regions:
+            if mp <= pos < rp:
+                tl = self.alias_scopes[-1].get(name, ()) if self.alias_scopes else ()
+                if not any(mp < bp <= pos for bp, _c in tl):   # no in-body rebind supersedes it yet
+                    return True
+        return False
+
+    def _scope_captures(self, scope_node):
+        """{name: [(mask_pos, restore_pos), …]} — the source regions where `name` is an except/
+        match CAPTURE in THIS scope (NOT into nested function/class/lambda scopes, which own their
+        captures). Drives _capture_masked (round-8 audit F1: the block-scoped masking overlay)."""
+        regions = {}
+
+        def walk(node):
+            for n in ast.iter_child_nodes(node):
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                    continue                              # a nested scope owns its own captures
+                for nm, mpos, rpos in _conditional_rebinds(n):
+                    regions.setdefault(nm, []).append((mpos, rpos))
+                walk(n)
+        walk(scope_node)
+        return regions
+
+    def _scope_alias_bindings(self, scope_node, param_names=()):
+        """{name: [((lineno,col), canonical_or_None), …]} in source order — a POSITION-AWARE
+        per-scope timeline of callable/module assignment aliases: `mv = os.replace`, `a = os`,
+        `o = getattr(builtins,"open")`, transitive `b = a` (resolved at the binding position
+        through the import maps + this scope's earlier aliases). A non-alias assignment records
+        `None` (so the name MASKS a module import of the same name). A PARAM is seeded as None at
+        (0,0) so it masks too — this builder runs BEFORE self.scopes exists, so the assignment-path
+        resolver could not otherwise see a param shadow (`def f(getattr): fn = getattr(os,"system")`
+        / `def f(os): os.replace(...)`), unlike the inline path via _canon (round-8 re-sweep). NOT
+        into nested scopes."""
         binds = {}
         NE = getattr(ast, "NamedExpr", None)
 
-        def add(name, lineno, kind):
-            binds.setdefault(name, []).append((lineno, kind))
+        def add(name, pos, canon):
+            binds.setdefault(name, []).append((pos, canon))
 
         for p in param_names:
-            add(p, 0, "other")
+            add(p, (0, 0), None)                                 # a param MASKS a module import / alias
 
-        def latest(name, lineno):
+        def at(name, pos):
+            c = None
+            for bp, cn in binds.get(name, ()):
+                if bp <= pos:
+                    c = cn
+            return c
+
+        def head_canon_at(head, pos):
+            # the dotted-head canonical AS OF pos, DISTINGUISHING a within-scope bind (None ->
+            # definitively shadowed) from 'unbound' (-> the import/builtin) — so a shadowed
+            # getattr does not dispatch while the bare builtin / a `builtins.getattr` alias does.
+            bound, c = False, None
+            for bp, cn in binds.get(head, ()):
+                if bp <= pos:
+                    bound, c = True, cn
+            return c if bound else self._resolve_import(head)
+
+        def head_is_capture(head, pos):
+            # `head` is a live except/match CAPTURE at pos (the caught exception / matched value),
+            # UNLESS a later in-body rebind in THIS alias timeline (`binds`) supersedes it. Keys on
+            # the HEAD name and yields to an in-handler rebind, using the LOCAL `binds` so it is valid
+            # DURING construction (round-8 re-sweep H1/H2: the old _head_captured matched the whole
+            # dotted string and ignored a superseding rebind).
+            for mp, rp in (self.capture_scopes[-1].get(head, ()) if self.capture_scopes else ()):
+                if mp <= pos < rp and not any(mp < bp <= pos for bp, _c in binds.get(head, ())):
+                    return True
+            return False
+
+        def resolve(value, pos):
+            if isinstance(value, ast.Call) and len(value.args) >= 2 \
+                    and isinstance(value.args[1], ast.Constant) and isinstance(value.args[1].value, str):
+                gfunc = value.func
+                while NE is not None and isinstance(gfunc, NE):  # `(h := (g := getattr))(...)` —
+                    gfunc = gfunc.value                          # unwrap NESTED walruses (re-sweep H3)
+                gh = _dotted_name(gfunc)                         # `o = getattr(<base>, "<literal>")`:
+                ghead, gdot, grest = gh.partition(".") if gh else ("", "", "")
+                if ghead and not head_is_capture(ghead, pos):   # the HEAD (not the whole dotted) must
+                    gc = head_canon_at(ghead, pos)              # not be a live capture; dispatch ONLY
+                    if gc and gdot:                             # when it resolves (shadow-safe) to the
+                        gc = gc + "." + grest                   # BUILTIN getattr (`builtins.getattr` /
+                    if gc in ("getattr", "builtins.getattr"):   # an alias / a walrus head all resolve).
+                        bl = resolve(value.args[0], pos)
+                        return bl + "." + value.args[1].value if bl else None
+            dn = _dotted_name(value)
+            if not dn:
+                return None
+            head, dot, rest = dn.partition(".")
+            if head_is_capture(head, pos):                       # `except E as os: fn = os.system` —
+                return None                                      # os is the caught exception, not the
+            bound, lc = False, None                              # module (round-8 re-sweep H5: the
+            for bp, cn in binds.get(head, ()):                   # capture check applied only to the
+                if bp <= pos:                                    # getattr head, not the general head/
+                    bound, lc = True, cn                         # base). distinguish a within-scope bind
+            if bound:                                            # (None -> shadowed: param / non-alias
+                return (lc + "." + rest if dot else lc) if lc else None  # assign / for) from UNBOUND ->
+            return self._resolve_import(dn)                      # the import / transitive alias.
+
+        def seq_alias(value, pos):
+            # a for-target over a LITERAL sequence holding a callable alias resolves to it,
+            # mirroring is_seqarch for archives (`for f in [os.system]: f(cmd)` -> f is os.system);
+            # an opaque iterable (a Name / call) yields None so the for-target RESETS — so the #3
+            # benign-reuse fix (`runner=os.system; for runner in items:`) is preserved (round-6 R6-2).
+            elts = None
+            if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+                elts = value.elts
+            elif isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+                elts = [value.elt]
+            for e in (elts or ()):
+                c = resolve(e, pos)
+                if c and "." in c:          # prefer a module-qualified canonical (the dangerous one)
+                    return c
+            return None
+
+        def add_target(target, value, pos):
+            # recursive matched-length tuple/list pairing (mirrors _scope_bindings.bind_target),
+            # so `runner, opts = os.system, {}` aliases runner -> os.system and `(a,(b,c)) =
+            # (1,(os.system,2))` aliases b; an unpairable target RESETS every bound name to None.
+            if isinstance(target, ast.Name):
+                add(target.id, pos, resolve(value, pos) if value is not None else None)
+            elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)) \
+                    and len(target.elts) == len(value.elts):
+                for t_el, v_el in zip(target.elts, value.elts):
+                    add_target(t_el, v_el, pos)
+            else:
+                for nm in _names_in_target(target):
+                    add(nm, pos, None)
+
+        def walk(node):
+            for n in ast.iter_child_nodes(node):
+                pos = (getattr(n, "lineno", 0), getattr(n, "col_offset", 0))
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    add(n.name, pos, None)         # def/class REBINDS its name here -> reset
+                    continue                       # its body is a nested scope (not recursed)
+                if isinstance(n, ast.Lambda):
+                    continue                       # anonymous — binds no name in this scope
+                # EVERY binding FORM that can (re)bind a name touches this timeline, in LOCK-STEP
+                # with _scope_bindings / _scope_method_refs / _scope_archive_names — an aliasing
+                # form sets a canonical, any other (re)bind RESETS to None so a prior alias does
+                # not leak past it. (round-6 sweep: checkered form-coverage across the 4 value-
+                # timelines was the disease — keep this branch set identical in all four.)
+                if NE is not None and isinstance(n, NE) and isinstance(n.target, ast.Name):
+                    add(n.target.id, pos, resolve(n.value, pos))
+                elif isinstance(n, ast.Assign):
+                    for tgt in n.targets:
+                        add_target(tgt, n.value, pos)
+                elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+                    if n.value is not None:
+                        add(n.target.id, pos, resolve(n.value, pos))   # `mv: Callable = os.replace`
+                    # a BARE annotation `mv: object` does NOT rebind at runtime (verified mv is
+                    # os.system) -> NO-OP (preserve the prior binding), in lock-step with the
+                    # __file__ timeline (round-6 CONFIRM sweep: a reset here was an FN regression).
+                elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
+                    add(n.target.id, pos, None)            # `mv += x` -> no longer a clean alias
+                elif isinstance(n, (ast.For, ast.AsyncFor)):
+                    seqc = seq_alias(n.iter, pos) if isinstance(n.target, ast.Name) else None
+                    if seqc is not None:
+                        add(n.target.id, pos, seqc)        # `for f in [os.system]:` -> f is os.system
+                    else:
+                        for nm in _names_in_target(n.target):  # a for-loop variable is not an alias
+                            add(nm, pos, None)
+                elif isinstance(n, (ast.With, ast.AsyncWith)):
+                    for item in n.items:                   # `with X as name` rebinds name -> reset
+                        if item.optional_vars is not None:
+                            for nm in _names_in_target(item.optional_vars):
+                                add(nm, pos, None)
+                elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                    for bnd, canon in _import_canon(n):    # `import os as run` / `from os import
+                        add(bnd, pos, self._resolve_import(canon))  # system as run` REBINDS the name
+                    # to a module/callable; the position-aware resolver must see it so a prior local
+                    # binding of the same name does not mask it (round-8 audit sibling-form D).
+                walk(n)
+        walk(scope_node)
+        return binds
+
+    @staticmethod
+    def _scope_bindings(scope_node, param_names=(), is_path_ctor=None, is_captured=None):
+        """POSITION-AWARE __file__ binding timeline for THIS scope (NOT into nested
+        function/class/lambda scopes). Returns `binds = {name: [(pos, kind), …]}` in
+        source order, pos = (lineno, col_offset), kind ∈ {'file','seqfile','other'}.
+        _self_target resolves a name AS OF a write call's POSITION (its most recent prior
+        binding), so `p=__file__; p.write(); p=None` fires (write while p IS __file__) and
+        `p=Path(__file__); p=p.with_name(x); p.write()` does not (rebound to a sibling BEFORE
+        the write). Position is (lineno, col) — NOT just lineno — so a same-LINE rebind
+        `p=Path(__file__); p.write(); p=None` does not mask the write either (round-4 audit).
+        A param (kind 'other' at pos (0,0)) masks an outer __file__ binding. 'seqfile' = bound
+        to a literal/comprehension sequence holding __file__ (`for p in paths` binds p 'file')."""
+        binds = {}
+        NE = getattr(ast, "NamedExpr", None)
+
+        def add(name, pos, kind):
+            binds.setdefault(name, []).append((pos, kind))
+
+        for p in param_names:
+            add(p, (0, 0), "other")
+
+        def latest(name, pos):
             st = None
-            for ln, k in binds.get(name, ()):
-                if ln <= lineno:
+            for bp, k in binds.get(name, ()):
+                if bp <= pos:
                     st = k
             return st
 
         def seq_holds_file(value):
             if isinstance(value, (ast.List, ast.Tuple)):
-                return any(_is_own_file_target(e) for e in value.elts)
+                return any(_is_own_file_target(e, is_path_ctor) for e in value.elts)
             if isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-                return _is_own_file_target(value.elt)
+                return _is_own_file_target(value.elt, is_path_ctor)
             return False
 
         def kind_of(value, lineno):
-            if _is_own_file_target(value):
+            if _is_own_file_target(value, is_path_ctor):
                 return "file"
-            if isinstance(value, ast.Name) and latest(value.id, lineno) == "file":
-                return "file"                      # transitive q = p
+            if isinstance(value, ast.Name) and latest(value.id, lineno) == "file" \
+                    and not (is_captured and is_captured(value.id, lineno)):
+                return "file"                      # transitive q = p (a captured p does NOT propagate)
             if seq_holds_file(value):
                 return "seqfile"
             return "other"
@@ -2303,9 +3008,12 @@ class _AstAuditor(ast.NodeVisitor):
 
         def walk(node):
             for n in ast.iter_child_nodes(node):
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                ln = (getattr(n, "lineno", 0), getattr(n, "col_offset", 0))
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    add(n.name, ln, "other")       # def/class REBINDS its name here -> reset
                     continue                       # a nested scope owns its own bindings
-                ln = getattr(n, "lineno", 0)
+                if isinstance(n, ast.Lambda):
+                    continue                       # anonymous — binds no name in this scope
                 if NE is not None and isinstance(n, NE) and isinstance(n.target, ast.Name):
                     bind_target(n.target, n.value, ln)
                 elif isinstance(n, ast.Assign):
@@ -2323,73 +3031,347 @@ class _AstAuditor(ast.NodeVisitor):
                     else:
                         for nm in _names_in_target(n.target):
                             add(nm, ln, "other")
+                elif isinstance(n, (ast.With, ast.AsyncWith)):
+                    for item in n.items:           # `with X as name` rebinds name -> reset (not __file__)
+                        if item.optional_vars is not None:
+                            for nm in _names_in_target(item.optional_vars):
+                                add(nm, ln, "other")
+                elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                    for bnd, _c in _import_canon(n):       # an import REBINDS the name to a module,
+                        add(bnd, ln, "other")              # never this skill's __file__ (sibling D).
                 walk(n)                            # recurse in source order
         walk(scope_node)
         return binds
 
-    @staticmethod
-    def _scope_method_refs(scope_node):
-        """name -> method-leaf for a method REFERENCE bound in THIS scope: `ex = t.extractall`,
-        `fn = getattr(t, "extractall")`, a transitive `b = a`, a tuple-unpack `a, _ = t.extractall,
-        None`, or a walrus `(a := t.extractall)` (Codex r3 re-sweep). Source order; NOT into
-        nested function/class/lambda scopes."""
+    def _scope_method_refs(self, scope_node):
+        """{name: [(pos, method-leaf-or-None, receiver_is_archive), …]} — a POSITION-AWARE
+        timeline of a method REFERENCE bound in THIS scope: `ex = t.extractall`, `fn =
+        getattr(t, "extractall")`, a transitive `b = a`, a tuple-unpack, or a walrus. A rebind
+        to a NON-ref records leaf=None (so `ex = a.extractall; ex(); ex = safe` does not flag
+        the LATER non-ref use, and a safe `ex()` BEFORE a later `ex = a.extractall` does not
+        flag — round-4 audit pass 3 final-state-map FN/FP). `receiver_is_archive` is resolved
+        AT the binding position. NOT into nested scopes; relies on this scope's archive set
+        already on self.archive_scopes."""
         refs = {}
         NE = getattr(ast, "NamedExpr", None)
 
-        def ref_leaf(value):
+        def ref_at(name, pos):
+            leaf, recv = None, False
+            for bp, lf, rc in refs.get(name, ()):
+                if bp <= pos:
+                    leaf, recv = lf, rc
+            return (leaf, recv) if leaf is not None else None
+
+        def ref_info(value, pos):
             if NE is not None and isinstance(value, NE):
-                return ref_leaf(value.value)
+                return ref_info(value.value, pos)
             if isinstance(value, ast.Attribute):
-                return value.attr
-            if isinstance(value, ast.Call) and _dotted_name(value.func) == "getattr" \
-                    and len(value.args) >= 2 and isinstance(value.args[1], ast.Constant) \
-                    and isinstance(value.args[1].value, str):
-                return value.args[1].value
-            if isinstance(value, ast.Name) and value.id in refs:
-                return refs[value.id]              # transitive b = a
+                return (value.attr, self._is_archive_expr(value.value))
+            if isinstance(value, ast.Call) and len(value.args) >= 2 \
+                    and isinstance(value.args[1], ast.Constant) and isinstance(value.args[1].value, str) \
+                    and self._func_canon(value.func, pos) in ("getattr", "builtins.getattr"):
+                # `fn = getattr(t, "extractall")` — builtins.getattr / an alias / a walrus head all
+                # resolve through _func_canon (shadow-safe + walrus-unwrap; method refs build after
+                # alias_scopes), round-8 audit + re-sweep.
+                return (value.args[1].value, self._is_archive_expr(value.args[0]))
+            if isinstance(value, ast.Name):
+                if self._capture_masked(value.id, pos):    # a LIVE captured `ex` does NOT propagate its
+                    return None                            # method-ref to `f = ex`; a captured name
+                return ref_at(value.id, pos)       # rebound to a real ref DOES (round-8 re-sweep H6/H7)
             return None
 
-        def bind(name, value):
-            leaf = ref_leaf(value)
-            if leaf is not None:
-                refs[name] = leaf
+        def bind(name, pos, value):
+            info = ref_info(value, pos)
+            refs.setdefault(name, []).append((pos, info[0] if info else None, info[1] if info else False))
+
+        def reset(name, pos):
+            refs.setdefault(name, []).append((pos, None, False))   # a non-ref rebind clears the ref
+
+        def seq_ref(value, pos):
+            # a for-target over a LITERAL sequence holding a method-ref resolves to it, mirroring
+            # is_seqarch (`for ex in [t.extractall]: ex()`); an opaque iterable yields None -> reset.
+            elts = None
+            if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+                elts = value.elts
+            elif isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+                elts = [value.elt]
+            for e in (elts or ()):
+                info = ref_info(e, pos)
+                if info:
+                    return info
+            return None
+
+        def bind_target(target, value, pos):
+            # recursive matched-length tuple/list pairing (mirrors _scope_bindings.bind_target):
+            # `ex, _ = t.extractall, 0` and nested `(a,(ex,c)) = (1,(t.extractall,2))` both bind ex;
+            # an unpairable target RESETS every bound name (no ref).
+            if isinstance(target, ast.Name):
+                bind(target.id, pos, value)
+            elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)) \
+                    and len(target.elts) == len(value.elts):
+                for t_el, v_el in zip(target.elts, value.elts):
+                    bind_target(t_el, v_el, pos)
             else:
-                refs.pop(name, None)               # rebound to a non-ref -> drop
+                for nm in _names_in_target(target):
+                    reset(nm, pos)
 
         def walk(node):
             for n in ast.iter_child_nodes(node):
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                pos = (getattr(n, "lineno", 0), getattr(n, "col_offset", 0))
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    reset(n.name, pos)             # def/class REBINDS its name here -> reset
                     continue
+                if isinstance(n, ast.Lambda):
+                    continue                       # anonymous — binds no name in this scope
+                # branch set kept in LOCK-STEP with the other three value-timelines (round-6 sweep).
                 if NE is not None and isinstance(n, NE) and isinstance(n.target, ast.Name):
-                    bind(n.target.id, n.value)
+                    bind(n.target.id, pos, n.value)
                 elif isinstance(n, ast.Assign):
                     for tgt in n.targets:
-                        if isinstance(tgt, ast.Name):
-                            bind(tgt.id, n.value)
-                        elif isinstance(tgt, (ast.Tuple, ast.List)) \
-                                and isinstance(n.value, (ast.Tuple, ast.List)) \
-                                and len(tgt.elts) == len(n.value.elts):
-                            for t_el, v_el in zip(tgt.elts, n.value.elts):
-                                if isinstance(t_el, ast.Name):
-                                    bind(t_el.id, v_el)
+                        bind_target(tgt, n.value, pos)
+                elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+                    if n.value is not None:
+                        bind(n.target.id, pos, n.value)        # `ex: Callable = t.extractall`
+                    # bare `ex: object` does NOT rebind at runtime -> NO-OP (preserve), lock-step
+                    # with __file__ (round-6 CONFIRM sweep C24: a reset here was an AST011 FN regression).
+                elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
+                    reset(n.target.id, pos)
+                elif isinstance(n, (ast.For, ast.AsyncFor)):
+                    info = seq_ref(n.iter, pos) if isinstance(n.target, ast.Name) else None
+                    if info is not None:
+                        refs.setdefault(n.target.id, []).append((pos, info[0], info[1]))
+                    else:
+                        for nm in _names_in_target(n.target):   # for-loop var is not a method-ref
+                            reset(nm, pos)
+                elif isinstance(n, (ast.With, ast.AsyncWith)):
+                    for item in n.items:                        # `with X as name` rebinds -> reset
+                        if item.optional_vars is not None:
+                            for nm in _names_in_target(item.optional_vars):
+                                reset(nm, pos)
+                elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                    for bnd, _c in _import_canon(n):            # an import REBINDS to a module, not a
+                        reset(bnd, pos)                         # method reference (sibling D).
                 walk(n)
         walk(scope_node)
         return refs
 
+    def _method_ref_at(self, name_node):
+        """(leaf, receiver_is_archive) for a Name that holds a method reference AS OF its
+        position (a later rebind to a non-ref does not leak back), or None."""
+        pos = (getattr(name_node, "lineno", 0), getattr(name_node, "col_offset", 0))
+        if self._capture_masked(name_node.id, pos):
+            return None                         # the name is an except/match capture here, not a ref
+        # the innermost scope that BINDS the name decides (a param / for / AnnAssign masks an
+        # outer archive method-ref — round-4 audit pass 5 FP); resolve its ref timeline as of pos.
+        i = self._local_binding_scope(name_node.id, pos)
+        if i is not None:
+            tl = self.method_scopes[i].get(name_node.id)
+            if tl:
+                leaf, recv = None, False
+                for bp, lf, rc in tl:
+                    if bp <= pos:
+                        leaf, recv = lf, rc
+                return (leaf, recv) if leaf is not None else None
+        return None
+
     def _func_attr(self, func):
         """The method leaf a call invokes: a direct `obj.attr`, an inline walrus
-        `(a := t.extractall)(…)`, OR a Name bound in scope to a method reference
-        (`ex = t.extractall` / `fn = getattr(t, "extractall")` / transitive / unpack)."""
+        `(a := t.extractall)(…)`, OR a Name bound in scope to a method reference AS OF its
+        position (`ex = t.extractall` / `fn = getattr(t, "extractall")` / transitive / unpack)."""
         NE = getattr(ast, "NamedExpr", None)
         if NE is not None and isinstance(func, NE):
             return self._func_attr(func.value)
         if isinstance(func, ast.Attribute):
             return func.attr
         if isinstance(func, ast.Name):
-            for refs in reversed(self.method_scopes):
-                if func.id in refs:
-                    return refs[func.id]
+            info = self._method_ref_at(func)
+            return info[0] if info else None
         return None
+
+    @staticmethod
+    def _archive_state(timeline, pos):
+        """The state of a name AS OF `pos` from its archive timeline of (pos, kind, cond),
+        kind in {'arch','seqarch','other'}: returns 'arch' / 'seqarch' / 'other'. A 'other'
+        (non-archive) rebind masks an earlier 'arch'/'seqarch' ONLY when it is UNCONDITIONAL
+        (cond=False, a top-level statement) — a rebind in a sibling try/except/if branch does
+        NOT mask the live archive on the other path (round-4 audit pass 3 #4)."""
+        last_arch = last_seq = None
+        for bp, kind, _cond in timeline:
+            if bp <= pos:
+                if kind == "arch":
+                    last_arch = bp
+                elif kind == "seqarch":
+                    last_seq = bp
+
+        def live(last):
+            if last is None:
+                return False
+            for bp, kind, cond in timeline:
+                if kind == "other" and not cond and last < bp <= pos:
+                    return False
+            return True
+        if live(last_arch):
+            return "arch"
+        if live(last_seq):
+            return "seqarch"
+        return "other"
+
+    def _name_archive_state(self, name_node):
+        """The 'arch'/'seqarch'/'other' state of a Name as of its position — the innermost
+        scope that binds it decides (param shadow), resolving AS OF the use position."""
+        pos = (getattr(name_node, "lineno", 0), getattr(name_node, "col_offset", 0))
+        if self._capture_masked(name_node.id, pos):
+            return "other"                      # the name is an except/match capture here, not an archive
+        for i in range(len(self.scopes) - 1, -1, -1):
+            if name_node.id in self.scopes[i]:
+                return self._archive_state(self.archive_scopes[i].get(name_node.id, ()), pos)
+        for binds in reversed(self.archive_scopes):          # closure: not locally bound
+            if name_node.id in binds:
+                return self._archive_state(binds[name_node.id], pos)
+        return "other"
+
+    def _is_archive_expr(self, node) -> bool:
+        """True if `node` PROVABLY evaluates to a tarfile/zipfile archive object: an opener
+        Call (canon-resolved), an IfExp whose either arm is an archive, a Name bound to one in
+        scope (assign / with-as / transitive / walrus, position-aware), or an indexed element
+        of a sequence-of-archives (`archives[0]`). A pandas `.str` accessor, a bs4 object, an
+        opaque param is NOT provable, so its `.extractall()` does not fire AST011."""
+        NE = getattr(ast, "NamedExpr", None)
+        if NE is not None and isinstance(node, NE):
+            node = node.value
+        if isinstance(node, ast.Call):
+            return self._func_canon(node.func,
+                               (getattr(node.func, "lineno", 0), getattr(node.func, "col_offset", 0))) in _ARCHIVE_OPENERS
+        if isinstance(node, ast.IfExp):
+            return self._is_archive_expr(node.body) or self._is_archive_expr(node.orelse)
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+            return self._name_archive_state(node.value) == "seqarch"   # archives[0].extractall()
+        if isinstance(node, ast.Name):
+            return self._name_archive_state(node) == "arch"
+        return False
+
+    def _extractall_on_archive(self, func) -> bool:
+        """True if the `extractall` receiver is a provable archive — a direct
+        `archive.extractall()` (incl. inline walrus) OR a method-ref `ex = archive.extractall;
+        ex()` whose receiver was an archive. Gap-5 provenance gate for AST011."""
+        NE = getattr(ast, "NamedExpr", None)
+        if NE is not None and isinstance(func, NE):
+            func = func.value
+        if isinstance(func, ast.Attribute):
+            return self._is_archive_expr(func.value)
+        if isinstance(func, ast.Name):
+            info = self._method_ref_at(func)
+            return info[1] if info else False
+        return False
+
+    def _scope_archive_names(self, scope_node):
+        """{name: [(pos, kind, cond), …]} per-scope timeline. kind in {'arch','seqarch',
+        'other'}: 'arch' = a tarfile/zipfile archive object (opener Call / with-as / IfExp arm
+        / transitive); 'seqarch' = a sequence HOLDING an opener (so `for x in <seqarch>` binds x
+        'arch', and `<seqarch>[i]` is an archive). `cond` marks a binding inside a conditional
+        sub-block. _archive_state resolves a name AS OF a use position: an UNCONDITIONAL non-
+        archive rebind masks an earlier archive; a sibling try/except/if-branch rebind does NOT
+        (round-4 audit pass 3 #3/#4/#5: a live archive on one path stays detected). NOT into
+        nested function/class/lambda scopes."""
+        binds = {}
+        NE = getattr(ast, "NamedExpr", None)
+
+        def add(name, pos, kind, cond):
+            binds.setdefault(name, []).append((pos, kind, cond))
+
+        def state(name, pos):
+            return self._archive_state(binds.get(name, ()), pos)
+
+        def is_opener(value):
+            return isinstance(value, ast.Call) \
+                and self._func_canon(value.func,
+                                (getattr(value.func, "lineno", 0), getattr(value.func, "col_offset", 0))) in _ARCHIVE_OPENERS
+
+        def is_arch(value, pos):
+            if NE is not None and isinstance(value, NE):
+                return is_arch(value.value, pos)
+            if is_opener(value):
+                return True
+            if isinstance(value, ast.IfExp):
+                return is_arch(value.body, pos) or is_arch(value.orelse, pos)
+            if isinstance(value, ast.Name):
+                return state(value.id, pos) == "arch" and not self._capture_masked(value.id, pos)  # b = a
+            return False
+
+        def is_seqarch(value, pos):
+            if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+                return any(is_arch(e, pos) for e in value.elts)
+            if isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+                return is_arch(value.elt, pos)
+            if isinstance(value, ast.Name):
+                return state(value.id, pos) == "seqarch" and not self._capture_masked(value.id, pos)
+            return False
+
+        def kind_of(value, pos):
+            if is_arch(value, pos):
+                return "arch"
+            if is_seqarch(value, pos):
+                return "seqarch"
+            return "other"
+
+        def bind_target(target, value, pos, cond):
+            # recursive matched-length tuple/list pairing (mirrors _scope_bindings.bind_target):
+            # `t, _ = tarfile.open(p), 0` records t 'arch'; an unpairable target RESETS to 'other'.
+            if isinstance(target, ast.Name):
+                add(target.id, pos, kind_of(value, pos), cond)
+            elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)) \
+                    and len(target.elts) == len(value.elts):
+                for t_el, v_el in zip(target.elts, value.elts):
+                    bind_target(t_el, v_el, pos, cond)
+            else:
+                for nm in _names_in_target(target):
+                    add(nm, pos, "other", cond)
+
+        def walk(node, cond):
+            for n in ast.iter_child_nodes(node):
+                pos = (getattr(n, "lineno", 0), getattr(n, "col_offset", 0))
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    add(n.name, pos, "other", cond)  # def/class REBINDS its name here -> reset
+                    continue
+                if isinstance(n, ast.Lambda):
+                    continue                         # anonymous — binds no name in this scope
+                if isinstance(n, (ast.With, ast.AsyncWith)):
+                    for item in n.items:
+                        ov = item.optional_vars
+                        if isinstance(ov, ast.Name):
+                            add(ov.id, pos, "arch" if is_opener(item.context_expr) else "other", cond)
+                if NE is not None and isinstance(n, NE) and isinstance(n.target, ast.Name):
+                    add(n.target.id, pos, kind_of(n.value, pos), cond)
+                elif isinstance(n, ast.Assign):
+                    for tgt in n.targets:
+                        bind_target(tgt, n.value, pos, cond)
+                elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+                    # `arch: T = tarfile.open(p)` records 'arch'; `arch: object = None` records the
+                    # non-archive value (resets). A BARE `arch: object` (no value) is a NO-OP that
+                    # preserves the prior provenance — lock-step with __file__ (round-6 CONFIRM sweep
+                    # C23: a reset on a bare annotation was an AST011 FN regression).
+                    if n.value is not None:
+                        add(n.target.id, pos, kind_of(n.value, pos), cond)
+                elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
+                    add(n.target.id, pos, "other", cond)       # `t += x` -> not a provable archive (FP-3)
+                elif isinstance(n, (ast.For, ast.AsyncFor)):
+                    # a for-target over a seqarch is 'arch'; otherwise it RESETS with the LIVE cond —
+                    # a top-level (unconditional) for-rebind masks an earlier archive, mirroring the
+                    # #3 for-reset in the other three timelines (sweep FP-1; was hardcoded cond=True,
+                    # so a top-level for never masked and leaked stale provenance).
+                    if isinstance(n.target, ast.Name):
+                        add(n.target.id, pos, "arch" if is_seqarch(n.iter, pos) else "other", cond)
+                    else:
+                        for nm in _names_in_target(n.target):
+                            add(nm, pos, "other", cond)
+                elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                    for bnd, _c in _import_canon(n):    # an import REBINDS to a MODULE (not an opened
+                        add(bnd, pos, "other", cond)    # archive object) -> reset provenance (sibling D).
+                child_cond = cond or isinstance(n, (ast.If, ast.For, ast.AsyncFor, ast.While,
+                                                    ast.Try, ast.With, ast.AsyncWith))
+                walk(n, child_cond)
+        walk(scope_node, False)
+        return binds
 
     def _self_target(self, node) -> bool:
         """The skill's own running file: inline `__file__`/`Path(__file__)` (walrus
@@ -2397,32 +3379,49 @@ class _AstAuditor(ast.NodeVisitor):
         the innermost scope that binds the name decides via its most-recent binding AS OF
         this node's line (so a write fires only while the name IS __file__, and a param or
         a rebind to a non-file value masks an outer __file__ binding)."""
-        if _is_own_file_target(node):
+        if _is_own_file_target(node, self._path_ctor_at):
             return True
         if isinstance(node, ast.Name):
-            lineno = getattr(node, "lineno", 0)
+            pos = (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+            if self._capture_masked(node.id, pos):
+                return False                    # the name is an except/match capture here, not __file__
             for binds in reversed(self.scopes):
                 if node.id in binds:
                     st = None
-                    for ln, k in binds[node.id]:
-                        if ln <= lineno:
+                    for bp, k in binds[node.id]:
+                        if bp <= pos:
                             st = k
                     return st == "file"       # 'other'/'seqfile'/use-before-bind -> masked
         return False
 
     def visit_Module(self, node):
-        self.scopes.append(self._scope_bindings(node))
+        # capture_scopes FIRST (depends only on the AST): _scope_alias_bindings reads it (via the
+        # local head_is_capture) during construction. Then alias_scopes (read by _path_ctor_at /
+        # _canon), then scopes/archive/method.
+        self.capture_scopes.append(self._scope_captures(node))
+        self.alias_scopes.append(self._scope_alias_bindings(node))
+        self.scopes.append(self._scope_bindings(node, is_path_ctor=self._path_ctor_at, is_captured=self._capture_masked))
+        self.archive_scopes.append(self._scope_archive_names(node))
         self.method_scopes.append(self._scope_method_refs(node))
         self.generic_visit(node)
+        self.alias_scopes.pop()
+        self.capture_scopes.pop()
         self.scopes.pop()
+        self.archive_scopes.pop()
         self.method_scopes.pop()
 
     def visit_FunctionDef(self, node):
         params = [a.arg for a in self._arg_names(node)]
-        self.scopes.append(self._scope_bindings(node, params))
+        self.capture_scopes.append(self._scope_captures(node))   # before alias: builders read it
+        self.alias_scopes.append(self._scope_alias_bindings(node, params))
+        self.scopes.append(self._scope_bindings(node, params, self._path_ctor_at, self._capture_masked))
+        self.archive_scopes.append(self._scope_archive_names(node))
         self.method_scopes.append(self._scope_method_refs(node))
         self.generic_visit(node)
+        self.alias_scopes.pop()
+        self.capture_scopes.pop()
         self.scopes.pop()
+        self.archive_scopes.pop()
         self.method_scopes.pop()
 
     visit_AsyncFunctionDef = visit_FunctionDef
@@ -2452,7 +3451,8 @@ class _AstAuditor(ast.NodeVisitor):
         ))
 
     def visit_Call(self, node):
-        name = self._canon(_dotted_name(node.func))
+        name = self._func_canon(node.func,
+                           (getattr(node.func, "lineno", 0), getattr(node.func, "col_offset", 0)))
         arg0 = node.args[0] if node.args else None
 
         # AST009 — skill rewrites its OWN running file at runtime (the write TARGET is
@@ -2461,14 +3461,17 @@ class _AstAuditor(ast.NodeVisitor):
         # write_bytes / os.replace|rename + shutil.copy*|move (destination). A Name bound
         # to __file__ on a prior line is NOT tracked (Codex audit: the global binding set
         # was flow-insensitive and produced cross-function false AST009).
-        if (name in ("open", "io.open") or name in self.open_aliases) \
-                and arg0 is not None and self._self_target(arg0):
+        # the FILE argument is read keyword-aware (`open(file=__file__)`, `os.open(path=…)`,
+        # `os.truncate(path=…)`, `fileinput.input(files=…)` are valid Python the positional-only
+        # check missed — round-7 audit), via _arg_or_kw; _self_target(None) is False.
+        if (name in ("open", "io.open", "builtins.open") or name in self.open_aliases) \
+                and self._self_target(_arg_or_kw(node, 0, "file")):
             # builtin open / io.open (io.open IS builtins.open) / an aliased open (Codex r3)
             if _write_mode(node, 1):
                 self._add(node, "AST009", "HIGH",
                           "open(__file__, <write>) writes the skill's own running file — runtime self-modification defeats a pre-install audit (audited-once, mutates-later)")
-        elif name == "os.open" and arg0 is not None and self._self_target(arg0) \
-                and len(node.args) >= 2 and _os_open_writes(node.args[1]):
+        elif name == "os.open" and self._self_target(_arg_or_kw(node, 0, "path")) \
+                and _os_open_writes(_arg_or_kw(node, 1, "flags")):
             # low-level os.open(__file__, O_WRONLY|O_TRUNC|…) + os.write — the POSIX-fd
             # form of a self-rewrite (Codex r3 sweep); flag at the writable open site.
             self._add(node, "AST009", "HIGH",
@@ -2482,11 +3485,30 @@ class _AstAuditor(ast.NodeVisitor):
               and self._self_target(node.func.value)):
             self._add(node, "AST009", "HIGH",
                       "." + node.func.attr + "(...) targets the skill's own file (__file__) — runtime self-modification")
-        elif (name in ("os.replace", "os.rename", "shutil.copyfile", "shutil.copy",
-                       "shutil.copy2", "shutil.move")
-              and len(node.args) >= 2 and self._self_target(node.args[1])):
+        # NOTE: Path(__file__).rename/.replace(dst) is deliberately NOT flagged — like the
+        # already-GREEN os.rename/os.replace(__file__, dst), __file__ there is the SOURCE moved
+        # AWAY (a backup/relocation), not the inject TARGET. AST009 is scoped to CONTENT rewrite
+        # of __file__ (DEST form); the source-move form stays out for consistency (round-6 sweep:
+        # the path-rename/replace finding was a misclassification vs the existing os.rename rule).
+        elif name == "os.truncate" and self._self_target(_arg_or_kw(node, 0, "path")):
+            # os.truncate(__file__, 0) zero-outs the running file (path form; os.ftruncate is on
+            # an fd and out of scope) — runtime self-modification (round-6 sweep AST009-truncate).
             self._add(node, "AST009", "HIGH",
-                      name + "(..., __file__) overwrites the skill's own running file — runtime self-modification")
+                      "os.truncate(__file__, ...) truncates the skill's own running file — runtime self-modification")
+        elif (name in ("fileinput.input", "fileinput.FileInput")
+              and self._self_target(_arg_or_kw(node, 0, "files")) and _inplace_edit(node)):
+            # fileinput with inplace=True redirects stdout INTO __file__, rewriting it in place —
+            # the stdlib in-place-edit idiom turned on the running file (round-6 sweep AST009-fileinput).
+            self._add(node, "AST009", "HIGH",
+                      "fileinput.input(__file__, inplace=True) rewrites the skill's own running file in place — runtime self-modification")
+        elif (name in ("os.replace", "os.rename", "os.symlink", "os.link", "shutil.copyfile",
+                       "shutil.copy", "shutil.copy2", "shutil.move")
+              and self._self_target(_arg_or_kw(node, 1, "dst"))):
+            # destination = __file__ (positional arg1 OR `dst=` keyword): overwrite (replace/
+            # rename/copy*/move) OR relink (symlink/link) the running file with attacker-chosen
+            # content (round-6 sweep AST009-symlink; CONFIRM sweep D-1: the dst= keyword form leaked).
+            self._add(node, "AST009", "HIGH",
+                      name + "(..., __file__) overwrites/relinks the skill's own running file — runtime self-modification")
 
         if name in _CODE_EXEC_BUILTINS:
             if arg0 is not None and _uses_constructor(arg0):
@@ -2533,12 +3555,17 @@ class _AstAuditor(ast.NodeVisitor):
 
         elif (name == "shutil.unpack_archive"
               or (self._func_attr(node.func) == "extractall"
+                  and self._extractall_on_archive(node.func)
                   and not _extract_is_guarded(node))):
-            # NOTE: keyed on the `extractall` method name (incl. method-ref / import-alias
-            # resolution), NOT bare `.extract` — bare `extract` collides with ubiquitous
-            # benign APIs (pandas `.str.extract`, bs4 `Tag.extract`, sklearn) and blew the
-            # MEDIUM FP budget (Codex r3 sweep). Single-member `.extract()` Zip-Slip and
-            # non-archive-provenance receivers are documented OOS (THREAT_MODEL).
+            # The extractall arm is gated on RECEIVER PROVENANCE (_extractall_on_archive):
+            # it fires only when the receiver provably resolves to a tarfile/zipfile archive
+            # (directly or through a method-ref). Keying on the bare `extractall` leaf alone
+            # FP'd on the common pandas `Series.str.extractall` and any non-archive
+            # `.extractall()` (convergence sweep gap 5) — and bare `.extract` was already
+            # excluded for the same collision reason (pandas `.str.extract`, bs4). The
+            # module-qualified `shutil.unpack_archive` is unambiguous, so it needs no gate.
+            # An OPAQUE-receiver extractall (archive object from another fn/file) is OOS
+            # (cross-function flow, THREAT_MODEL #4), as is single-member `.extract()`.
             self._add(node, "AST011", "MEDIUM",
                       "archive extractall / unpack_archive without a member filter — Zip-Slip "
                       "path traversal can overwrite files outside the target dir (e.g. ~/.ssh, ~/.claude)")
@@ -2584,6 +3611,7 @@ def ast_scan(path: Path, rel: str) -> list[Finding]:
     open_aliases = set()
     import_modules = {}   # local alias -> real module:  `import shutil as sh` -> sh: shutil
     import_from = {}      # local name  -> module.leaf:   `from shutil import unpack_archive [as up]`
+    star_modules = set()  # `from shutil import *` -> {shutil}  (star-import alias, gap 6)
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name):
             if node.value.id in _CODE_EXEC_BUILTINS:
@@ -2606,11 +3634,72 @@ def ast_scan(path: Path, rel: str) -> list[Finding]:
                     import_modules[a.asname] = a.name
         elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
             for a in node.names:
-                if a.name != "*":
+                if a.name == "*":
+                    star_modules.add(node.module)        # `from <mod> import *` (gap 6)
+                else:
                     import_from[a.asname or a.name] = node.module + "." + a.name
 
-    # Pass 2 — detect.
-    auditor = _AstAuditor(rel, text, alias, open_aliases, import_modules, import_from)
+    def _resolve_import(nm):
+        if nm in import_from:
+            return import_from[nm]
+        head, dot, rest = nm.partition(".")
+        if dot and head in import_modules:
+            return import_modules[head] + "." + rest
+        if not dot and star_modules:
+            for mod in star_modules:
+                cand = mod + "." + nm
+                if cand in _STAR_RESOLVABLE or cand in _ARCHIVE_OPENERS:
+                    return cand
+        return nm
+
+    # ASSIGNMENT aliases of a callable — `mv = os.replace`, `PP = pathlib.Path`, the
+    # transitive `b = a` — resolved through the import maps to a canonical name. The import
+    # resolver already folds `import as`/`from … import`; an assignment binding is the
+    # SIBLING form that defeated AST009's ctor/open/dest arms (convergence sweep round 4).
+    # A fixpoint propagates transitive chains; recording every alias is harmless (only the
+    # ones that resolve to a name a rule keys on ever fire).
+    assign_pairs = []
+    def_class_names = set()                      # names bound by def/class are functions/classes,
+    for node in ast.walk(tree):                  # never callable aliases — dropped from the map below
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            def_class_names.add(node.name)
+        if not isinstance(node, ast.Assign):
+            continue
+        rhs = None
+        if isinstance(node.value, (ast.Name, ast.Attribute)):
+            rhs = _dotted_name(node.value)              # X = os.replace / X = os
+        elif isinstance(node.value, ast.Call) \
+                and _dotted_name(node.value.func) == "getattr" \
+                and len(node.value.args) >= 2 \
+                and isinstance(node.value.args[1], ast.Constant) \
+                and isinstance(node.value.args[1].value, str):
+            base = _dotted_name(node.value.args[0])      # o = getattr(builtins, "open")
+            rhs = base + "." + node.value.args[1].value if base else None
+        if rhs:
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    assign_pairs.append((tgt.id, rhs))
+    assign_aliases = {}
+    for _ in range(8):                       # transitive fixpoint (b = a = os.replace)
+        changed = False
+        for lhs, rhs in assign_pairs:
+            resolved = assign_aliases.get(rhs) or _resolve_import(rhs)
+            if assign_aliases.get(lhs) != resolved:
+                assign_aliases[lhs] = resolved
+                changed = True
+        if not changed:
+            break
+    for nm in def_class_names:
+        assign_aliases.pop(nm, None)             # a def/class rebinds the name -> NOT a dangerous
+                                                 # callable alias in the flow-insensitive global map
+                                                 # (round-7 CONFIRM FP-1/FP-2: the per-scope def-reset
+                                                 # was overridden cross-scope by this fallback -> a
+                                                 # benign dispatch module read AST003/RED).
+
+    # Pass 2 — detect. (The aliased pathlib.Path constructor is resolved POSITION-AWARELY by
+    # the auditor's _path_ctor_at via the per-scope alias timeline, not a global set.)
+    auditor = _AstAuditor(rel, text, alias, open_aliases, import_modules, import_from,
+                          star_modules, assign_aliases)
     auditor.visit(tree)
     return auditor.findings
 
@@ -2805,14 +3894,16 @@ class _TaintAuditor:
         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             self._walk_block(stmt.body, set())   # fresh scope; params untainted
             return
-        # 1) sinks in this statement's OWN expressions (lambda bodies as fresh
+        # 1) apply WALRUS binds FIRST — a walrus binds within the expression and is
+        #    available to the rest of the SAME statement (left-to-right eval), so
+        #    `(t := os.getenv("X")) and post(data=t)` must taint t before the sink in
+        #    the same statement is scanned (round-4 audit: sink-before-walrus read GREEN).
+        self._apply_walrus(stmt, tainted)
+        # 2) sinks in this statement's OWN expressions (lambda bodies as fresh
         #    scopes; nested statement blocks are walked separately below)
         self._scan_sinks(stmt, tainted)
-        # 2) seed / propagate taint from assignments AND walrus binds (after the RHS
-        #    is scanned). A walrus `(t := os.environ["X"])` binds `t` in THIS scope —
-        #    without this it read GREEN (Codex audit).
+        # 3) seed / propagate taint from plain assignments (for SUBSEQUENT statements).
         self._apply_assign(stmt, tainted)
-        self._apply_walrus(stmt, tainted)
         # 3) recurse into nested statement blocks (same scope, source order)
         for block in self._child_blocks(stmt):
             self._walk_block(block, tainted)
@@ -3136,11 +4227,13 @@ def inventory(skill_root: Path) -> dict:
     # skip_dirs at the directory level and cap total nodes visited.
     MAX_NODES = 100000
     nodes = 0
+    truncated = False
     stack = [skill_root]
     while stack:
         d = stack.pop()
         nodes += 1
         if nodes > MAX_NODES:
+            truncated = True
             break
         try:
             entries = sorted(d.iterdir())
@@ -3149,6 +4242,7 @@ def inventory(skill_root: Path) -> dict:
         for p in entries:
             nodes += 1
             if nodes > MAX_NODES:
+                truncated = True
                 break
             # Check symlink BEFORE is_dir()/is_file(): a symlink to a directory
             # is not descended (and is noted), avoiding loops.
@@ -3176,6 +4270,7 @@ def inventory(skill_root: Path) -> dict:
         "text_files": sorted(text_files),
         "other_files": sorted(other_files),
         "total_bytes": total_bytes,
+        "truncated": truncated,
     }
 
 
@@ -3204,6 +4299,17 @@ def main() -> int:
 
     inv = inventory(skill_root)
     findings: list[Finding] = []
+
+    if inv.get("truncated"):
+        # The inventory walk hit its node cap — files past the cap (a hidden exec binary,
+        # symlink, or script) were NOT classified or scanned. FAIL LOUD, never silently
+        # GREEN, mirroring the supply-walk truncation posture (convergence round-4 audit).
+        findings.append(Finding(
+            severity="HIGH", rule_id="IO004", file="", line=0, snippet="<tree truncated>",
+            why=("the skill's directory tree is too large to fully inventory (node cap) — "
+                 "files beyond the cap were not classified or scanned; a binary, symlink, or "
+                 "script could be hidden in the un-walked remainder. Inspect the tree by hand."),
+            suggested_fix="A skill should be a handful of text files; a >100k-node tree is itself a red flag."))
 
     # Structural passes (parse JSON / never execute). Each is wrapped so a crash in
     # one pass — e.g. a RecursionError on a maliciously deep-nested config — degrades
