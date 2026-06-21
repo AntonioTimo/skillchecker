@@ -3229,11 +3229,26 @@ class _AstAuditor(ast.NodeVisitor):
 
     def visit_Call(self, node):
         pos = (getattr(node.func, "lineno", 0), getattr(node.func, "col_offset", 0))
-        # the callee is resolved to the SET of possible canonical names (an IfExp arm, a literal-seq
-        # element, a bound union, a walrus — all enumerated). Every name-keyed rule runs PER candidate
-        # so a benign member can not hide a dangerous one and arm/element ORDER never changes findings
-        # (the user-mandated set model); `emit` deduplicates by rule_id so a union of same-rule members
-        # (e.g. `os.system if c else os.popen`) fires AST003 exactly once.
+        # AST002 — a bare Name ALIASED to a code-exec builtin (`run = eval; run(...)`): the aliasing
+        # itself is the signal, so it fires on ANY call (incl. a LITERAL arg, which the code-exec arm
+        # AST001 would miss). The unified resolver canonicalizes the alias to the builtin, so the AST002
+        # arm (keyed on the alias NAME) no longer matched on the resolved canon — detect it by the RAW
+        # callee name instead, SHADOW-AWARE: a local param `run` masks the module alias, so its resolved
+        # canon is NOT a code-exec builtin and this does not fire. When it fires, the generic dispatch is
+        # skipped so the call is reported once as AST002 (its historical single finding).
+        raw = node.func
+        if isinstance(raw, ast.Name) and raw.id in self.alias \
+                and self._facts_of(raw, pos).canon in _CODE_EXEC_BUILTINS:
+            self._add(node, "AST002", "CRITICAL",
+                      "call to '" + raw.id + "', an alias of " + self.alias[raw.id]
+                      + "() — hidden dynamic code execution")
+            self.generic_visit(node)
+            return
+        # otherwise the callee is resolved to the SET of possible canonical names (an IfExp arm, a
+        # literal-seq element, a bound union, a walrus — all enumerated). Every name-keyed rule runs PER
+        # candidate so a benign member can not hide a dangerous one and arm/element ORDER never changes
+        # findings (the user-mandated set model); `emit` deduplicates by rule_id so a union of same-rule
+        # members (e.g. `os.system if c else os.popen`) fires AST003 exactly once.
         cands = self._callee_canons(node.func, pos)
         arg0 = node.args[0] if node.args else None
         emitted = set()
