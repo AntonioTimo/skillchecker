@@ -4,7 +4,7 @@ All notable changes to skill-checker.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [1.11.1] — 2026-06-20
+## [1.11.1] — 2026-06-22
 
 **Convergence sweep — round 4 (two adversarial passes).** Self-run multi-agent adversarial
 sweeps against the v1.11.0 scanner, then a re-verification pass that attacked every round-4
