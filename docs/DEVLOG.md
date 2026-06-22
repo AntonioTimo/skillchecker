@@ -20,11 +20,72 @@ docs → PR → squash-merge → GitHub release.
 | H | Taint / data-flow: credential → network exfil (TF001/TF002) | v1.8.0 | [#9](https://github.com/AntonioTimo/skillchecker/pull/9) | ✅ released |
 | I | Self-targeting prose + self-modification + activation-surface (borrow-from-SkillSpector) | v1.9.0 | [#10](https://github.com/AntonioTimo/skillchecker/pull/10) | ✅ released |
 | J | Ecosystem hardening (2026 supply-chain + prompt-injection + MCP secret-egress) | v1.10.0 | [#11](https://github.com/AntonioTimo/skillchecker/pull/11) | ✅ released |
-| — | Adversarial-audit hardening (Codex + self-run multi-agent sweeps, to convergence) | v1.11.0 | (PR pending) | 🔧 committed, pre-merge |
-| — | Convergence sweep round 4 — 8 confirmed defects (7 false-NEG + 1 false-POS), no new rule IDs | v1.11.1 | (PR pending) | 🔧 committed, pre-merge |
-| — | Round 8 — except/match capture masking (overlay), import-as, walrus-call-target, F2 getattr unify; sweep caught its own regressions, no new rule IDs | v1.11.1 | (PR pending) | 🔧 working tree, pre-merge |
+| — | Adversarial-audit hardening (Codex + self-run multi-agent sweeps, to convergence) | v1.11.0 | [#12](https://github.com/AntonioTimo/skillchecker/pull/12) | ✅ released (in v1.11.1) |
+| — | Convergence sweep round 4 — 8 confirmed defects (7 false-NEG + 1 false-POS), no new rule IDs | v1.11.1 | [#12](https://github.com/AntonioTimo/skillchecker/pull/12) | ✅ released |
+| — | Round 8 — except/match capture masking (overlay), import-as, walrus-call-target, F2 getattr unify; sweep caught its own regressions, no new rule IDs | v1.11.1 | [#12](https://github.com/AntonioTimo/skillchecker/pull/12) | ✅ released |
+| — | **Rounds 9–13 — set-model unification:** ONE ValueFacts evaluator (4 walkers → 1, −562 lines), SET-valued unions closed under expression constructors, nested-union dedup (Codex rejects 1–3 + re-sweeps); `AST002` latent-regression fix caught by CI; no new rule IDs | v1.11.1 | [#12](https://github.com/AntonioTimo/skillchecker/pull/12) | ✅ released |
 
 ---
+
+## v1.11.1 (final) — set-model unification: ONE ValueFacts evaluator, union closed under constructors (rounds 8–13, Codex rejects 1–3)
+
+**Goal.** End the sibling-bug cycle the resolve()/`AST009`/`AST011` hardening kept spawning, then survive
+three more external **Codex** rejects — each a real model-completeness gap, not noise. Shipped (consolidated)
+as **v1.11.1** via **PR #12**. **No new rule IDs** across rounds 8–13: this is internal correctness, not new
+detection surface.
+
+**The diagnosis (round-8, external Codex).** The except/match capture, `import as`, walrus-call-target, and
+getattr-unification fixes (F1/F2, G1–G3, H1–H7) were all *siblings of one disease*: **four independent
+per-scope timeline walkers** (callable-alias / `__file__` / archive / method-ref), each with its own binding
+logic plus an overlay patch on top. Any new `binding-form × provenance-domain × shadow/rebind/transitive/
+capture/walrus` combination spawned a new sibling. Latches don't converge; a single source does.
+
+**The structural fix (round-9, incremental — NOT big-bang).** Collapse the four walkers into ONE abstract
+interpreter over a unified `_VF` (ValueFacts holding canonical-callable · self-file · archive · method-ref
+simultaneously). Migrated behind a **differential golden harness** (`scripts/diff_baseline.py`): a parallel
+evaluator was proven byte-identical to the four old walkers on the whole corpus per domain, then the
+production resolvers were **cut over** and the four walkers **deleted** (−562 lines). One `bind_target` /
+`eval_expr` is now the single binding/resolution source; H1–H7's whole class is constructively impossible
+(a new combination is handled in one place, not four). *Empirical parity on a finite corpus, not a proof —
+recorded honestly.*
+
+**The set model (round-11, Codex reject 1).** A callee can denote a SET of callables — an `IfExp` arm, a
+literal-sequence element, a bound union. The round-10 collapse (`a or b` / "first dangerous") was lossy and
+ORDER-dependent: `(math.sin if c else os.system)(cmd)` read GREEN, and a two-danger union's finding flipped
+with arm order. Re-rooted so `_VF` *represents the set*: `members` + a POSITIONAL `seq`; one commutative /
+associative / idempotent `_vf_join`; the dispatch enumerates members (a benign arm can't hide a dangerous
+one; a literal subscript honors its index; a cross-rule union fires *every* member's rule). The five old
+per-domain visit-time resolvers became dead and were deleted — `_facts_of` + `eval_expr` are now the sole
+resolver.
+
+**Closure under constructors (round-12, Codex reject 2 + a 6-facet re-sweep that found 3 more FNs).** A union
+was lost the moment an Attribute / getattr / Subscript was applied on top (the resolver read the union's
+*summary*, not its members). Every constructor is now a homomorphism over the union (distribute over members
+→ join); self-file lifts through the `IfExp` join (an `(dangerous if c else __file__)` arm no longer
+short-circuits the ternary to self-file and drops the dangerous member); a for-target unions every element;
+a comprehension is an unbounded-length sequence (any constant index yields its representative). **Nested-union
+dedup (round-13, Codex reject 3):** the dedup key now recurses into a nested union's `members` as an
+order-independent frozenset, so a union inside a sequence retains every member.
+
+**The latent regression CI caught (and the golden lesson).** On the *first push* of the branch, CI's per-rule
+assertion failed: `evil-ast` had silently lost **`AST002`** (`run = eval; run(payload)`) since the round-9
+unification — the evaluator canonicalizes the alias to `eval`, so the AST002 arm (keyed on the alias *name*)
+missed. It went undetected because I **re-captured the golden baseline** after the change (so `compare`
+reported no drift — golden guards step-to-step, not against the shipped product) and the local verify checked
+only exit codes (still 3 via `AST001`/`AST003`). Fix: detect the alias by the RAW callee name, shadow-aware
+via `_facts_of`. The backstops that actually catch this: the **CI per-rule asserts** and a **rule-id-multiset
+diff against the last release** (which confirmed `AST002` was the *only* evil-fixture loss).
+
+**Method, reaffirmed.** Every Codex/sweep finding reproduced against the live scanner *before* the fix; fixed
+at the disease class (one `_dotted_name` unwrap, one `_vf_join`, one homomorphism — not N edges); each fix
+adversarially re-swept (the round-12 re-sweep caught regressions the round-12 fix itself introduced, before
+merge); every fix locked as a fixture + a CI snippet assert; golden-gated at each step.
+
+**Residual boundaries (OOS, documented in THREAT_MODEL §8).** Value-flow / interprocedural resolution (a
+closure free-variable or a `global`-rebind observed at a module-level call), a comprehension *loop-variable*
+scope, and a dict/set-literal subscript callee (`{0: os.system}[0]()` — only list/tuple carry a positional
+seq) remain out of scope; the SKILL.md LLM-review steps are the backstop. Release criterion (unchanged):
+finite forms covered + boundary documented + LLM backstop — *not* "the auditor finds zero".
 
 ## Convergence sweep round 4 — Unicode-property boundary, polarity inversion, import-alias, provenance, rc-redirect (v1.11.1)
 
